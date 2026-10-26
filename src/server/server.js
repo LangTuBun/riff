@@ -21,6 +21,7 @@ const I18N_FIX = {
 const logger = require('../shared/logger');
 const { getSystemAudioOutputInfo, getOutputEndpointFormats } = require('../shared/audio-output');
 const { summarizeProbe, parseFfmpegBanner } = require('../shared/audio-quality');
+const { classifyUltrasonic, maxItunesArtwork, pickBestCover } = require('../shared/lossless');
 const sockseek = require('./sockseek');
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -2990,7 +2991,8 @@ async function importLosslessDownload(job, filePath) {
     await fs.promises.copyFile(filePath, dest);
     fs.rmSync(filePath, { force: true });
   }
-  libraryIndex[id] = {
+  const hiRes = await analyzeHiRes(dest, probe.info).catch(() => null);
+  const item = {
     id,
     file,
     ext,
@@ -2998,18 +3000,181 @@ async function importLosslessDownload(job, filePath) {
     artist: job.artist || 'Unknown artist',
     duration: Math.round(probe.info.duration || 0),
     addedAt: Date.now(),
-    source: 'soulseek'
+    source: 'soulseek',
+    matchKey: job.key || '',
+    hiRes
   };
+  libraryIndex[id] = item;
+  saveLibraryIndex();
+  const cover = await ensureLibraryCover(item, {
+    artist: job.cleanArtist || job.artist,
+    title: job.cleanTitle || job.title,
+    extraUrls: job.thumbnail ? [job.thumbnail] : []
+  }).catch(() => null);
+  if (cover && !cover.embedded && ext === 'flac') {
+    await embedCoverIntoFlac(dest, cover.path).catch(() => {});
+  }
   saveLibraryIndex();
   return {
     libraryId: id,
     codec: probe.info.codec,
     sampleRate: probe.info.sampleRate,
-    bitDepth: probe.info.bitDepth
+    bitDepth: probe.info.bitDepth,
+    hiRes,
+    coverSize: cover ? `${cover.width}x${cover.height}` : ''
   };
 }
 
-sockseek.init({ onDownloaded: importLosslessDownload });
+function runFfTool(name, args, timeoutMs = 60000) {
+  return new Promise((resolve) => {
+    const bin = resolveBinary(name);
+    if (!bin) return resolve({ code: -1, stdout: '', stderr: `${name} not found` });
+    const proc = spawn(bin, args, { windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) {} }, timeoutMs);
+    proc.stdout.on('data', (d) => { if (stdout.length < 200000) stdout += d; });
+    proc.stderr.on('data', (d) => { if (stderr.length < 400000) stderr += d; });
+    proc.on('error', () => { clearTimeout(timer); resolve({ code: -1, stdout, stderr }); });
+    proc.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+  });
+}
+
+async function measureBandDb(file, lo, hi, startSec) {
+  const { stderr } = await runFfTool('ffmpeg', [
+    '-hide_banner', '-nostats', '-ss', String(startSec), '-t', '20', '-i', file,
+    '-af', `firequalizer=gain='if(between(f,${lo},${hi}),0,-200)':delay=0.05:accuracy=100,astats=measure_perchannel=none`,
+    '-f', 'null', '-'
+  ], 120000);
+  const m = stderr.match(/RMS level dB:\s*(-?[\d.]+|-inf)/);
+  if (!m) return NaN;
+  return m[1] === '-inf' ? -Infinity : Number(m[1]);
+}
+
+async function analyzeHiRes(file, info) {
+  if (!info || !info.sampleRate || info.sampleRate < 88200) return null;
+  const start = Math.max(0, Math.floor((info.duration || 60) * 0.3));
+  const below = await measureBandDb(file, 17000, 21000, start);
+  const above = await measureBandDb(file, 24000, 30000, start);
+  return { verdict: classifyUltrasonic(below, above), below: Math.round(below), above: Number.isFinite(above) ? Math.round(above) : null };
+}
+
+async function imageSize(file) {
+  const { stdout } = await runFfTool('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', file], 15000);
+  try {
+    const s = JSON.parse(stdout).streams[0];
+    return { width: Number(s.width) || 0, height: Number(s.height) || 0 };
+  } catch (e) {
+    return { width: 0, height: 0 };
+  }
+}
+
+async function downloadImageTo(url, dest) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(15000), headers: { 'User-Agent': 'Mozilla/5.0' } });
+  if (!res.ok) return null;
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length < 500) return null;
+  await fs.promises.writeFile(dest, buf);
+  return dest;
+}
+
+async function findItunesCoverUrl(artist, title) {
+  if (!title) return '';
+  const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(`${artist || ''} ${title}`.trim())}&entity=song&limit=10`, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) return '';
+  const data = await res.json();
+  const want = String(artist || '').toLowerCase();
+  const wantTitle = String(title).toLowerCase();
+  const results = (data.results || []).filter(r => r && r.artworkUrl100);
+  const match = results.find(r => (!want || String(r.artistName || '').toLowerCase().includes(want)) && String(r.trackName || '').toLowerCase().startsWith(wantTitle)) ||
+    results.find(r => !want || String(r.artistName || '').toLowerCase().includes(want));
+  return match ? maxItunesArtwork(match.artworkUrl100) : '';
+}
+
+async function ensureLibraryCover(item, opts = {}) {
+  const dest = path.join(THUMBNAILS_DIR, `${cleanTrackId(item.id)}.jpg`);
+  item.coverCheckedAt = Date.now();
+  const audioPath = path.join(LIBRARY_DIR, path.basename(item.file || ''));
+  const work = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'riff-cover-'));
+  try {
+    const candidates = [];
+    const embeddedPath = path.join(work, 'embedded.img');
+    const ex = await runFfTool('ffmpeg', ['-y', '-v', 'error', '-i', audioPath, '-an', '-map', '0:v:0', '-c:v', 'copy', '-f', 'image2', embeddedPath], 30000);
+    if (ex.code === 0 && fs.existsSync(embeddedPath)) candidates.push({ path: embeddedPath, source: 'embedded', rank: 1 });
+    const urls = [];
+    try {
+      const itunes = await findItunesCoverUrl(opts.artist || item.artist, opts.title || item.title);
+      if (itunes) urls.push({ url: itunes, source: 'itunes', rank: 0 });
+    } catch (e) {}
+    for (const u of opts.extraUrls || []) urls.push({ url: upgradeArtworkUrl(u) || u, source: 'stream', rank: 2 });
+    for (let i = 0; i < urls.length; i++) {
+      const p = path.join(work, `remote-${i}.img`);
+      try {
+        if (await downloadImageTo(urls[i].url, p)) candidates.push({ path: p, source: urls[i].source, rank: urls[i].rank });
+      } catch (e) {}
+    }
+    for (const c of candidates) Object.assign(c, await imageSize(c.path));
+    const best = pickBestCover(candidates);
+    if (!best) return null;
+    fs.mkdirSync(THUMBNAILS_DIR, { recursive: true });
+    await fs.promises.copyFile(best.path, dest);
+    item.cover = true;
+    item.coverAt = Date.now();
+    item.coverSource = best.source;
+    return { path: dest, width: best.width, height: best.height, source: best.source, embedded: candidates.some(c => c.source === 'embedded') };
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
+
+async function audioMd5(file) {
+  const { code, stdout } = await runFfTool('ffmpeg', ['-v', 'error', '-i', file, '-map', '0:a', '-f', 'md5', '-'], 300000);
+  const m = stdout.match(/MD5=([a-f0-9]{32})/);
+  return code === 0 && m ? m[1] : null;
+}
+
+async function embedCoverIntoFlac(audioPath, coverPath) {
+  const tmp = `${audioPath}.cover.flac`;
+  try {
+    const r = await runFfTool('ffmpeg', ['-y', '-v', 'error', '-i', audioPath, '-i', coverPath,
+      '-map', '0:a', '-map', '1:0', '-c', 'copy', '-disposition:v:0', 'attached_pic',
+      '-metadata:s:v', 'title=Album cover', '-metadata:s:v', 'comment=Cover (front)', tmp], 300000);
+    if (r.code !== 0) return false;
+    const [before, after] = await Promise.all([audioMd5(audioPath), audioMd5(tmp)]);
+    if (!before || before !== after) return false;
+    await fs.promises.rename(tmp, audioPath);
+    return true;
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+const coverBackfillQueue = [];
+let coverBackfillRunning = false;
+
+function queueCoverBackfill(items) {
+  for (const item of items) {
+    if (item.cover || coverBackfillQueue.includes(item.id)) continue;
+    if (item.coverCheckedAt && Date.now() - item.coverCheckedAt < 7 * 24 * 3600 * 1000) continue;
+    coverBackfillQueue.push(item.id);
+  }
+  if (coverBackfillRunning) return;
+  coverBackfillRunning = true;
+  (async () => {
+    while (coverBackfillQueue.length) {
+      const item = libraryIndex[coverBackfillQueue.shift()];
+      if (!item || item.cover) continue;
+      await ensureLibraryCover(item).catch(() => {});
+      saveLibraryIndex();
+    }
+    coverBackfillRunning = false;
+  })();
+}
+
+sockseek.init({
+  onDownloaded: importLosslessDownload,
+  hasLibraryTrack: (key) => Object.values(libraryIndex).some(item => item.matchKey === key && fs.existsSync(path.join(LIBRARY_DIR, path.basename(item.file || ''))))
+});
 
 function readJsonBody(req, res) {
   return new Promise((resolve) => {
@@ -3068,9 +3233,25 @@ async function handleLosslessRoute(req, res, pathname) {
         album: body.album ? String(body.album) : '',
         duration: Number(body.duration) || 0,
         artistMaybeWrong: body.platform === 'youtube',
-        lengthUnreliable: body.platform === 'youtube'
+        lengthUnreliable: body.platform === 'youtube',
+        thumbnail: typeof body.thumbnail === 'string' ? body.thumbnail : '',
+        preferHiRes: body.preferHiRes === true
       });
       return sendJson(res, 200, { success: true, download: job });
+    }
+    if (pathname === '/api/lossless/download-batch') {
+      const tracks = (Array.isArray(body.tracks) ? body.tracks : []).slice(0, 500).map(t => ({
+        title: String((t && t.title) || ''),
+        artist: String((t && t.artist) || ''),
+        album: t && t.album ? String(t.album) : '',
+        duration: Number(t && t.duration) || 0,
+        artistMaybeWrong: !!t && t.platform === 'youtube',
+        lengthUnreliable: !!t && t.platform === 'youtube',
+        thumbnail: t && typeof t.thumbnail === 'string' ? t.thumbnail : ''
+      })).filter(t => t.title);
+      if (!tracks.length) return sendJson(res, 400, { success: false, error: 'No tracks to download' });
+      const summary = await sockseek.submitBatch(tracks, { name: String(body.name || ''), preferHiRes: body.preferHiRes === true });
+      return sendJson(res, 200, { success: true, ...summary });
     }
     if (pathname === '/api/lossless/cancel') {
       await sockseek.cancelDownload(String(body.id || ''));
@@ -4148,6 +4329,7 @@ const TOKEN_PROTECTED_ROUTES = new Set([
   '/api/lossless/account',
   '/api/lossless/account/clear',
   '/api/lossless/download',
+  '/api/lossless/download-batch',
   '/api/lossless/cancel',
   '/api/track-analysis',
   '/api/tools-status',
@@ -6726,7 +6908,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (parsedUrl.pathname === '/api/library') {
-    const list = Object.values(libraryIndex)
+    const items = Object.values(libraryIndex);
+    queueCoverBackfill(items);
+    const port = (server.address() && server.address().port) || PORT;
+    const list = items
       .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
       .map(item => ({
         id: item.id,
@@ -6734,7 +6919,7 @@ const server = http.createServer(async (req, res) => {
         title: item.title,
         artist: item.artist,
         duration: Number(item.duration) || 0,
-        thumbnail: ''
+        thumbnail: item.cover ? `http://127.0.0.1:${port}/api/local-thumbnail?id=${encodeURIComponent(item.id)}&v=${item.coverAt || 0}` : ''
       }));
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(list));
@@ -6760,6 +6945,7 @@ const server = http.createServer(async (req, res) => {
               if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
             } catch (e) {}
           }
+          fs.rmSync(path.join(THUMBNAILS_DIR, `${cleanTrackId(id)}.jpg`), { force: true });
           delete libraryIndex[id];
           saveLibraryIndex();
         }

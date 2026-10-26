@@ -42,7 +42,11 @@ function cleanSoulseekQuery(track) {
   };
 }
 
-function buildSongJobRequest(query) {
+function buildSongJobRequest(query, opts) {
+  const preferredCond = { lengthTolerance: 3 };
+  if (opts && opts.preferHiRes) {
+    Object.assign(preferredCond, { minBitDepth: 24, minSampleRate: 88200, maxSampleRate: 384000, maxBitrate: 20000 });
+  }
   return {
     songQuery: query,
     options: {
@@ -50,7 +54,7 @@ function buildSongJobRequest(query) {
       downloadSettings: {
         search: {
           necessaryCond: { formats: { replace: LOSSLESS_FORMATS.slice() }, lengthTolerance: 15 },
-          preferredCond: { lengthTolerance: 3 }
+          preferredCond
         },
         ytDlp: { useYtdlp: false },
         skip: { skipExisting: false }
@@ -76,10 +80,28 @@ function buildSockseekConf({ username, password }) {
   ].join('\n');
 }
 
+// band levels in dBFS just below (17-21 kHz) and just above (24-30 kHz) the CD Nyquist
+function classifyUltrasonic(below, above) {
+  if (!Number.isFinite(below) || below < -100) return 'unknown';
+  if (!Number.isFinite(above)) return 'upsampled';
+  return below - above >= 40 ? 'upsampled' : 'hires';
+}
+
+function maxItunesArtwork(url) {
+  const u = String(url || '');
+  return /\/\d+x\d+bb\.(jpg|png)$/i.test(u) ? u.replace(/\/\d+x\d+bb\.(jpg|png)$/i, '/3000x3000bb-100.jpg') : u;
+}
+
+function pickBestCover(candidates) {
+  const usable = (candidates || []).filter(c => c && c.width > 0 && c.height > 0);
+  usable.sort((a, b) => (b.width * b.height) - (a.width * a.height) || (a.rank || 0) - (b.rank || 0));
+  return usable[0] || null;
+}
+
 function isLosslessExtension(ext) {
   return LOSSLESS_FORMATS.includes(String(ext || '').replace(/^\./, '').toLowerCase());
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { LOSSLESS_FORMATS, primaryArtist, cleanTitle, cleanSoulseekQuery, buildSongJobRequest, buildSockseekConf, isLosslessExtension };
+  module.exports = { LOSSLESS_FORMATS, primaryArtist, cleanTitle, cleanSoulseekQuery, buildSongJobRequest, buildSockseekConf, isLosslessExtension, classifyUltrasonic, maxItunesArtwork, pickBestCover };
 }

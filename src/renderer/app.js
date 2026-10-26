@@ -18427,7 +18427,10 @@ function bindCoverHoldZoom(wrapEl) {
     }
 
     const dlTabs = document.querySelectorAll('.dl-mode-tab');
-    dlTabs.forEach(t => t.classList.toggle('active', t.dataset.dlTab === 'download'));
+    dlTabs.forEach(t => {
+      t.classList.toggle('active', t.dataset.dlTab === 'download');
+      t.classList.remove('hidden');
+    });
     const dlPaneDownload = document.getElementById('dl-pane-download');
     const dlPaneTrim = document.getElementById('dl-pane-trim');
     const dlPaneLossless = document.getElementById('dl-pane-lossless');
@@ -18481,7 +18484,11 @@ function bindCoverHoldZoom(wrapEl) {
     downloadBatch = { name: playlist.name || 'Playlist', tracks };
     el.downloadModal.classList.add('batch-mode');
     const dlModeTabs = document.getElementById('dl-mode-tabs');
-    if (dlModeTabs) dlModeTabs.style.display = 'none';
+    if (dlModeTabs) dlModeTabs.style.display = '';
+    document.querySelectorAll('.dl-mode-tab').forEach(t => {
+      t.classList.toggle('active', t.dataset.dlTab === 'download');
+      t.classList.toggle('hidden', t.dataset.dlTab === 'trim');
+    });
     const dlPaneDownload = document.getElementById('dl-pane-download');
     const dlPaneTrim = document.getElementById('dl-pane-trim');
     const dlPaneLossless = document.getElementById('dl-pane-lossless');
@@ -21984,7 +21991,8 @@ function bindCoverHoldZoom(wrapEl) {
   }
 
   const losslessModal = document.getElementById('lossless-modal');
-  const ll = { status: null, downloads: [], known: new Map(), timer: 0 };
+  const ll = { status: null, downloads: [], known: new Map(), timer: 0, batchByName: {}, announced: new Set() };
+  const LL_TERMINAL = ['done', 'failed', 'cancelled', 'skipped'];
   const llApi = (route, body) => fetch(`http://127.0.0.1:${state.serverPort}/api/lossless/${route}`, body ? {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -21998,7 +22006,8 @@ function bindCoverHoldZoom(wrapEl) {
     importing: 'Checking file',
     done: 'Added to library',
     failed: 'Failed',
-    cancelled: 'Cancelled'
+    cancelled: 'Cancelled',
+    skipped: 'Skipped'
   };
 
   function llReadiness() {
@@ -22024,10 +22033,12 @@ function bindCoverHoldZoom(wrapEl) {
     sub.className = 'll-sub';
     const quality = job.bitDepth || job.sampleRate ? ` · ${[job.bitDepth ? `${job.bitDepth}-bit` : '', job.sampleRate ? aqLib.formatRate(job.sampleRate) : ''].filter(Boolean).join(' / ')}` : '';
     const progress = job.state === 'downloading' && job.progress ? ` ${job.progress}%` : '';
-    sub.textContent = `${LL_STATE_TEXT[job.state] || job.state}${progress}${quality}${job.error ? ` · ${job.error}` : ''}`;
+    const verdict = job.hiRes && job.hiRes.verdict === 'upsampled' ? ' · likely upsampled from CD quality'
+      : job.hiRes && job.hiRes.verdict === 'hires' ? ' · real hi-res content' : '';
+    sub.textContent = `${LL_STATE_TEXT[job.state] || job.state}${progress}${quality}${verdict}${job.error ? ` · ${job.error}` : ''}`;
     text.append(name, sub);
     row.append(text);
-    if (!['done', 'failed', 'cancelled'].includes(job.state)) {
+    if (!LL_TERMINAL.includes(job.state)) {
       const cancel = document.createElement('button');
       cancel.className = 'btn-text-error';
       cancel.textContent = 'Cancel';
@@ -22043,7 +22054,10 @@ function bindCoverHoldZoom(wrapEl) {
     aqSet('ll-pane-status', readiness.text);
     aqSet('ll-modal-status', readiness.text);
     const btnFind = document.getElementById('btn-ll-find');
-    if (btnFind) btnFind.disabled = !readiness.ready || !trackToDownload;
+    if (btnFind) {
+      btnFind.disabled = !readiness.ready || (!trackToDownload && !downloadBatch);
+      aqSet('btn-ll-find', downloadBatch ? `Find lossless copies (${downloadBatch.tracks.length})` : 'Find lossless copy');
+    }
     const btnSetup = document.getElementById('btn-ll-open-setup');
     if (btnSetup) btnSetup.textContent = readiness.ready ? 'Downloads' : 'Set up';
 
@@ -22066,9 +22080,25 @@ function bindCoverHoldZoom(wrapEl) {
       aqSet('ll-account-name', hasAccount ? `Signed in as ${s.username}` : '');
     }
 
-    const forTrack = trackToDownload ? ll.downloads.filter(d => d.title === trackToDownload.title && d.artist === (trackToDownload.artist || '')) : [];
     const paneJobs = document.getElementById('ll-pane-jobs');
-    if (paneJobs) paneJobs.replaceChildren(...forTrack.slice(0, 3).map(llJobRow));
+    if (paneJobs && downloadBatch) {
+      const batchId = ll.batchByName[downloadBatch.name];
+      const batchJobs = batchId ? ll.downloads.filter(d => d.batchId === batchId) : [];
+      const rows = [];
+      if (batchJobs.length) {
+        const count = (states) => batchJobs.filter(d => states.includes(d.state)).length;
+        const summary = document.createElement('div');
+        summary.className = 'll-sub ll-batch-summary';
+        summary.textContent = `${count(['done'])} added · ${count(['starting', 'searching', 'downloading', 'importing'])} in progress · ${count(['failed', 'cancelled'])} not found · ${count(['skipped'])} skipped (of ${batchJobs.length})`;
+        rows.push(summary);
+        const order = (d) => (LL_TERMINAL.includes(d.state) ? 1 : 0);
+        batchJobs.slice().sort((a, b) => order(a) - order(b)).slice(0, 60).forEach(d => rows.push(llJobRow(d)));
+      }
+      paneJobs.replaceChildren(...rows);
+    } else if (paneJobs) {
+      const forTrack = trackToDownload ? ll.downloads.filter(d => d.title === trackToDownload.title && d.artist === (trackToDownload.artist || '')) : [];
+      paneJobs.replaceChildren(...forTrack.slice(0, 3).map(llJobRow));
+    }
     const modalJobs = document.getElementById('ll-modal-jobs');
     if (modalJobs) {
       if (ll.downloads.length) modalJobs.replaceChildren(...ll.downloads.map(llJobRow));
@@ -22082,13 +22112,30 @@ function bindCoverHoldZoom(wrapEl) {
   }
 
   function llNotify() {
+    const batches = new Map();
+    for (const job of ll.downloads) {
+      if (!job.batchId) continue;
+      if (!batches.has(job.batchId)) batches.set(job.batchId, []);
+      batches.get(job.batchId).push(job);
+    }
+    for (const [batchId, list] of batches) {
+      if (ll.announced.has(batchId)) continue;
+      if (!list.every(j => LL_TERMINAL.includes(j.state))) continue;
+      ll.announced.add(batchId);
+      if (!list.some(j => ll.known.has(j.id) && ll.known.get(j.id) !== j.state)) continue;
+      const done = list.filter(j => j.state === 'done').length;
+      const missing = list.filter(j => j.state === 'failed').length;
+      showToast(`${list[0].batchName || 'Playlist'}: ${done} lossless track${done === 1 ? '' : 's'} added${missing ? `, ${missing} not found` : ''}`, done ? 'success' : 'info');
+      if (done && typeof renderLocalView === 'function' && state.localTracks) renderLocalView(true);
+    }
     for (const job of ll.downloads) {
       const prev = ll.known.get(job.id);
       ll.known.set(job.id, job.state);
-      if (!prev || prev === job.state) continue;
+      if (!prev || prev === job.state || job.batchId) continue;
       if (job.state === 'done') {
         const q = [job.codec ? job.codec.toUpperCase() : 'Lossless', job.bitDepth ? `${job.bitDepth}-bit` : '', job.sampleRate ? aqLib.formatRate(job.sampleRate) : ''].filter(Boolean).join(' ');
         showToast(`${q} added to library: ${job.title}`, 'success');
+        if (job.hiRes && job.hiRes.verdict === 'upsampled') showToast(`${job.title}: labelled hi-res but has no content above 22 kHz, likely an upsampled CD`, 'info');
         if (typeof renderLocalView === 'function' && state.localTracks) renderLocalView(true);
       } else if (job.state === 'failed') {
         showToast(`Lossless download failed: ${job.error || job.title}`, 'error');
@@ -22105,7 +22152,7 @@ function bindCoverHoldZoom(wrapEl) {
     } catch (e) {}
     llNotify();
     llRender();
-    const busy = ll.downloads.some(d => !['done', 'failed', 'cancelled'].includes(d.state)) ||
+    const busy = ll.downloads.some(d => !LL_TERMINAL.includes(d.state)) ||
       (ll.status && ll.status.install.status === 'downloading');
     const visible = losslessModal && !losslessModal.classList.contains('hidden');
     clearTimeout(ll.timer);
@@ -22149,13 +22196,36 @@ function bindCoverHoldZoom(wrapEl) {
     const btnClear = document.getElementById('btn-ll-clear-account');
     if (btnClear) btnClear.addEventListener('click', () => llApi('account/clear', {}).then(refreshLossless).catch(() => {}));
 
+    const hiresToggle = document.getElementById('ll-prefer-hires');
+    if (hiresToggle) {
+      try { hiresToggle.checked = localStorage.getItem('riff_lossless_prefer_hires') === '1'; } catch (e) {}
+      hiresToggle.addEventListener('change', () => {
+        try { localStorage.setItem('riff_lossless_prefer_hires', hiresToggle.checked ? '1' : '0'); } catch (e) {}
+      });
+    }
+
     const btnFind = document.getElementById('btn-ll-find');
     if (btnFind) btnFind.addEventListener('click', async () => {
+      const preferHiRes = !!(document.getElementById('ll-prefer-hires') || {}).checked;
+      if (downloadBatch) {
+        btnFind.disabled = true;
+        try {
+          const tracks = downloadBatch.tracks.map(x => ({ title: x.title || '', artist: x.artist || '', album: x.album || '', duration: Number(x.duration) || 0, platform: x.platform || '', thumbnail: x.thumbnail || '' }));
+          const res = await llApi('download-batch', { name: downloadBatch.name, tracks, preferHiRes });
+          if (!res.success) throw new Error(res.error);
+          ll.batchByName[downloadBatch.name] = res.batchId;
+          showToast(`Searching Soulseek for ${res.submitted} track${res.submitted === 1 ? '' : 's'}${res.skipped ? ` (${res.skipped} already downloaded or queued)` : ''}`, 'info');
+        } catch (e) {
+          showToast(e.message || 'Could not start lossless downloads', 'error');
+        }
+        refreshLossless();
+        return;
+      }
       const t = trackToDownload;
       if (!t) return;
       btnFind.disabled = true;
       try {
-        const res = await llApi('download', { title: t.title || '', artist: t.artist || '', album: t.album || '', duration: Number(t.duration) || 0, platform: t.platform || '' });
+        const res = await llApi('download', { title: t.title || '', artist: t.artist || '', album: t.album || '', duration: Number(t.duration) || 0, platform: t.platform || '', thumbnail: t.thumbnail || '', preferHiRes });
         if (!res.success) throw new Error(res.error);
         showToast(`Searching Soulseek for ${res.download.query}`, 'info');
       } catch (e) {

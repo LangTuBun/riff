@@ -3,7 +3,39 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { cleanSoulseekQuery, buildSongJobRequest, buildSockseekConf, isLosslessExtension, primaryArtist, cleanTitle } = require('../src/shared/lossless');
+const { cleanSoulseekQuery, buildSongJobRequest, buildSockseekConf, isLosslessExtension, primaryArtist, cleanTitle, classifyUltrasonic, maxItunesArtwork, pickBestCover } = require('../src/shared/lossless');
+
+test('hi-res preference raises sockseek ranking ceilings', () => {
+  const q = cleanSoulseekQuery({ title: 'x', artist: 'y' });
+  const plain = buildSongJobRequest(q).options.downloadSettings.search.preferredCond;
+  const hires = buildSongJobRequest(q, { preferHiRes: true }).options.downloadSettings.search.preferredCond;
+  assert.strictEqual(plain.minBitDepth, undefined);
+  assert.deepStrictEqual(hires, { lengthTolerance: 3, minBitDepth: 24, minSampleRate: 88200, maxSampleRate: 384000, maxBitrate: 20000 });
+});
+
+test('ultrasonic cliff marks upsampled files', () => {
+  assert.strictEqual(classifyUltrasonic(-39.9, -104.8), 'upsampled');
+  assert.strictEqual(classifyUltrasonic(-39.8, -39.5), 'hires');
+  assert.strictEqual(classifyUltrasonic(-60, -61), 'hires');
+  assert.strictEqual(classifyUltrasonic(-130, -140), 'unknown');
+  assert.strictEqual(classifyUltrasonic(-40, -Infinity), 'upsampled');
+});
+
+test('itunes artwork urls are asked for the largest original', () => {
+  assert.strictEqual(maxItunesArtwork('https://is1-ssl.mzstatic.com/image/thumb/a/b.jpg/100x100bb.jpg'), 'https://is1-ssl.mzstatic.com/image/thumb/a/b.jpg/3000x3000bb-100.jpg');
+  assert.strictEqual(maxItunesArtwork('https://example.com/x.jpg'), 'https://example.com/x.jpg');
+});
+
+test('largest cover wins, ties go to the better source', () => {
+  const best = pickBestCover([
+    { source: 'embedded', width: 500, height: 500, rank: 1 },
+    { source: 'itunes', width: 1500, height: 1500, rank: 0 },
+    { source: 'stream', width: 0, height: 0, rank: 2 }
+  ]);
+  assert.strictEqual(best.source, 'itunes');
+  assert.strictEqual(pickBestCover([{ source: 'embedded', width: 1000, height: 1000, rank: 1 }, { source: 'itunes', width: 1000, height: 1000, rank: 0 }]).source, 'itunes');
+  assert.strictEqual(pickBestCover([]), null);
+});
 
 test('youtube music metadata is reduced to the primary artist and bare title', () => {
   const q = cleanSoulseekQuery({ title: 'Get Lucky (feat. Pharrell Williams and Nile Rodgers)', artist: 'Daft Punk, Pharrell Williams & Nile Rodgers', duration: 369.6 });

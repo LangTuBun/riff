@@ -19,6 +19,8 @@ const daemon = { proc: null, port: 0, starting: null, error: '', soulseek: null 
 const jobs = new Map();
 let pollTimer = null;
 let pollInFlight = false;
+let importChain = Promise.resolve();
+let hasLibraryTrack = null;
 let onDownloaded = null;
 
 const FAILURE_MESSAGES = {
@@ -177,7 +179,7 @@ function killStaleDaemon() {
 }
 
 function publicJob(job) {
-  const { ssJobId, finished, ...rest } = job;
+  const { ssJobId, finished, cleanArtist, cleanTitle, thumbnail, key, ...rest } = job;
   return rest;
 }
 
@@ -241,24 +243,73 @@ async function pollJobsOnce() {
       continue;
     }
     job.state = 'importing';
-    try {
-      const imported = await onDownloaded(job, path.resolve(p.downloadPath));
-      Object.assign(job, imported);
-      finishJob(job, 'done');
-    } catch (e) {
-      finishJob(job, 'failed', e.message);
-    }
+    const filePath = path.resolve(p.downloadPath);
+    importChain = importChain.then(async () => {
+      try {
+        const imported = await onDownloaded(job, filePath);
+        Object.assign(job, imported);
+        finishJob(job, 'done');
+      } catch (e) {
+        finishJob(job, 'failed', e.message);
+      }
+    });
   }
 }
 
-async function submitDownload(track) {
+function jobKey(query) {
+  return `${query.artist || ''}\u0000${query.title || ''}`.toLowerCase();
+}
+
+async function submitBatch(tracks, opts) {
+  const batchId = crypto.randomBytes(6).toString('hex');
+  const summary = { batchId, submitted: 0, skipped: 0 };
+  for (const track of tracks) {
+    const query = cleanSoulseekQuery(track);
+    if (!query.title) continue;
+    const key = jobKey(query);
+    const queued = [...jobs.values()].some(j => !j.finished && j.key === key);
+    const owned = hasLibraryTrack ? hasLibraryTrack(key) : false;
+    if (queued || owned) {
+      const job = {
+        id: crypto.randomBytes(8).toString('hex'),
+        batchId,
+        batchName: opts.name || '',
+        title: track.title || query.title,
+        artist: track.artist || query.artist || '',
+        query: [query.artist, query.title].filter(Boolean).join(' - '),
+        key,
+        state: 'skipped',
+        error: owned ? 'Already in your library' : 'Already in the download queue',
+        progress: 0,
+        finished: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      jobs.set(job.id, job);
+      summary.skipped++;
+      continue;
+    }
+    await submitDownload({ ...track, preferHiRes: opts.preferHiRes }, { batchId, batchName: opts.name || '' });
+    summary.submitted++;
+  }
+  return summary;
+}
+
+async function submitDownload(track, batch) {
   const query = cleanSoulseekQuery(track);
   if (!query.title) throw new Error('Track title is missing');
   const job = {
     id: crypto.randomBytes(8).toString('hex'),
+    batchId: batch ? batch.batchId : '',
+    batchName: batch ? batch.batchName : '',
+    key: jobKey(query),
     title: track.title || query.title,
     artist: track.artist || query.artist || '',
     query: [query.artist, query.title].filter(Boolean).join(' - '),
+    cleanArtist: query.artist || '',
+    cleanTitle: query.title || '',
+    thumbnail: /^https?:\/\//i.test(track.thumbnail || '') ? track.thumbnail : '',
+    preferHiRes: !!track.preferHiRes,
     state: 'starting',
     progress: 0,
     error: '',
@@ -268,7 +319,7 @@ async function submitDownload(track) {
   jobs.set(job.id, job);
   try {
     await startDaemon();
-    const res = await api('POST', '/api/jobs/downloads/song', buildSongJobRequest(query));
+    const res = await api('POST', '/api/jobs/downloads/song', buildSongJobRequest(query, { preferHiRes: job.preferHiRes }));
     job.ssJobId = res && res.jobId;
     if (!job.ssJobId) throw new Error('sockseek did not accept the job');
     job.state = 'searching';
@@ -289,7 +340,7 @@ async function cancelDownload(id) {
 }
 
 function listDownloads() {
-  return [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 50).map(publicJob);
+  return [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 500).map(publicJob);
 }
 
 function sockseekStatus() {
@@ -307,8 +358,9 @@ function sockseekStatus() {
 
 function init(opts) {
   onDownloaded = opts.onDownloaded;
+  hasLibraryTrack = opts.hasLibraryTrack || null;
 }
 
 process.on('exit', stopDaemon);
 
-module.exports = { init, saveAuth, clearAuth, startDaemon, stopDaemon, submitDownload, cancelDownload, listDownloads, sockseekStatus, INCOMING_DIR };
+module.exports = { init, saveAuth, clearAuth, startDaemon, stopDaemon, submitDownload, submitBatch, cancelDownload, listDownloads, sockseekStatus, INCOMING_DIR };
