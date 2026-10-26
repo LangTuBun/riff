@@ -556,24 +556,11 @@ function runGUI() {
       });
 
       ipcMain.handle('import-audio-files', async () => {
-        const r = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections', 'openDirectory'], filters: [{ name: 'Audio', extensions: ['mp3','wav','flac','opus','ogg','oga','m4a','aac','webm','weba'] }] });
+        const r = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'], filters: [{ name: 'Audio', extensions: ['mp3','wav','flac','opus','ogg','oga','m4a','aac','webm','weba'] }] });
         if (r.canceled) return [];
-        const AUDIO_EXT = new Set(['mp3','wav','flac','opus','ogg','oga','m4a','aac','webm','weba']);
-        const sources = [];
-        for (const p of r.filePaths) {
-          const st = fs.statSync(p);
-          if (st.isDirectory()) {
-            for (const f of fs.readdirSync(p)) {
-              const fp = path.join(p, f);
-              if (AUDIO_EXT.has(path.extname(f).slice(1).toLowerCase()) && fs.statSync(fp).isFile()) sources.push(fp);
-            }
-          } else {
-            sources.push(p);
-          }
-        }
         fs.mkdirSync(LIBRARY_DIR, { recursive: true });
         const out = [];
-        for (const src of sources) {
+        for (const src of r.filePaths) {
           const st = fs.statSync(src), ext = path.extname(src).slice(1).toLowerCase();
           const id = 'local_' + crypto.createHash('sha1').update(path.basename(src) + st.size).digest('hex').slice(0, 12);
           const file = `${id}.${ext}`;
