@@ -131,6 +131,8 @@
       if (!this.graphInitialized) {
         try {
           this.mediaSource = this.ctx.createMediaElementSource(audioElement);
+          this.srcTap = this.ctx.createGain();
+          this.mediaSource.connect(this.srcTap);
 
           this.stdInput = this.ctx.createGain();
           this.hqInput = this.ctx.createGain();
@@ -280,8 +282,9 @@
       }
       this._routingState = stateKey;
 
+      try { this.srcTap.disconnect(this.hqInput); } catch (e) {}
+      try { this.srcTap.disconnect(this.stdInput); } catch (e) {}
       try {
-        this.mediaSource.disconnect();
         this.stdInput.disconnect();
         this.hqLimiter.disconnect();
         this.bus.disconnect();
@@ -298,9 +301,9 @@
 
       const inputNode = isHqOn ? this.hqLimiter : this.stdInput;
       if (isHqOn) {
-        this.mediaSource.connect(this.hqInput);
+        this.srcTap.connect(this.hqInput);
       } else {
-        this.mediaSource.connect(this.stdInput);
+        this.srcTap.connect(this.stdInput);
       }
 
       if (isEqOn) {
@@ -612,6 +615,59 @@
       for (let i = 0; i < this.levelBuf.length; i++) sum += this.levelBuf[i] * this.levelBuf[i];
       const rms = Math.sqrt(sum / this.levelBuf.length);
       return rms > 0 ? 20 * Math.log10(rms) : -120;
+    }
+
+    attachQualityMonitor() {
+      if (!this.graphInitialized || !this.srcTap || !this.fadeGain) return null;
+      if (!this.qmSource) {
+        this.qmSource = this.ctx.createAnalyser();
+        this.qmSource.fftSize = 16384;
+        this.qmSource.smoothingTimeConstant = 0;
+        this.qmSource.minDecibels = -140;
+        this.qmSource.maxDecibels = 0;
+        this.qmUpmix = this.ctx.createGain();
+        this.qmUpmix.channelCount = 2;
+        this.qmUpmix.channelCountMode = 'explicit';
+        this.qmUpmix.channelInterpretation = 'speakers';
+        this.qmSplitter = this.ctx.createChannelSplitter(2);
+        this.qmUpmix.connect(this.qmSplitter);
+        this.qmLeft = this.ctx.createAnalyser();
+        this.qmRight = this.ctx.createAnalyser();
+        this.qmLeft.fftSize = 4096;
+        this.qmRight.fftSize = 4096;
+        this.qmSplitter.connect(this.qmLeft, 0);
+        this.qmSplitter.connect(this.qmRight, 1);
+      }
+      if (!this._qmAttached) {
+        this.srcTap.connect(this.qmSource);
+        this.fadeGain.connect(this.qmUpmix);
+        this._qmAttached = true;
+      }
+      return { source: this.qmSource, left: this.qmLeft, right: this.qmRight };
+    }
+
+    detachQualityMonitor() {
+      if (!this._qmAttached) return;
+      try { this.srcTap.disconnect(this.qmSource); } catch (e) {}
+      try { this.fadeGain.disconnect(this.qmUpmix); } catch (e) {}
+      this._qmAttached = false;
+    }
+
+    getProcessingState() {
+      const s = this.audioSettings;
+      const el = this._attachedElement;
+      return {
+        hq: this.hqEnabled ? this.hqSettings.engine : '',
+        eq: this._isEqActive(),
+        reverb: s.reverb || 0,
+        echo: s.echo || 0,
+        distortion: s.distortion || 0,
+        playbackRate: el ? el.playbackRate : 1,
+        preservesPitch: el ? el.preservesPitch !== false : true,
+        preampGain: this.masterGain ? this.masterGain.gain.value : 1,
+        normGainDb: this.normGain && this.normGain.gain.value > 0 ? 20 * Math.log10(this.normGain.gain.value) : 0,
+        elementVolume: el ? (el.muted ? 0 : el.volume) : 1
+      };
     }
 
     setNormalizeGainDb(db) {

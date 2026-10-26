@@ -19,7 +19,8 @@ const I18N_FIX = {
 };
 
 const logger = require('../shared/logger');
-const { getSystemAudioOutputInfo } = require('../shared/audio-output');
+const { getSystemAudioOutputInfo, getOutputEndpointFormats } = require('../shared/audio-output');
+const { summarizeProbe, parseFfmpegBanner } = require('../shared/audio-quality');
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const SAFE_MEDIA_URL = /^https?:\/\//i;
@@ -2898,6 +2899,78 @@ async function handleDownloadedTrack(req, res, name) {
   }
 }
 
+const audioProbeCache = new Map();
+
+function runAudioProbe(input) {
+  return new Promise((resolve) => {
+    const ffprobe = resolveBinary('ffprobe');
+    const ffmpeg = resolveBinary('ffmpeg');
+    const bin = ffprobe || ffmpeg;
+    if (!bin) return resolve({ error: 'ffprobe not found' });
+    const args = ffprobe
+      ? ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', '-select_streams', 'a:0', input]
+      : ['-hide_banner', '-nostdin', '-i', input];
+    const proc = spawn(bin, args, { windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) {} }, 6000);
+    proc.stdout.on('data', (d) => { if (stdout.length < 1000000) stdout += d; });
+    proc.stderr.on('data', (d) => { if (stderr.length < 200000) stderr += d; });
+    proc.on('error', () => { clearTimeout(timer); resolve({ error: 'probe failed to start' }); });
+    proc.on('close', () => {
+      clearTimeout(timer);
+      let info = null;
+      if (ffprobe) {
+        try { info = summarizeProbe(JSON.parse(stdout)); } catch (e) {}
+      } else {
+        info = parseFfmpegBanner(stderr);
+      }
+      resolve(info ? { info, tool: ffprobe ? 'ffprobe' : 'ffmpeg' } : { error: 'no audio stream found' });
+    });
+  });
+}
+
+async function resolveAudioProbeInput(kind, id, name) {
+  if (kind === 'cache') return findCachedFile(id);
+  if (kind === 'library') {
+    const item = libraryIndex[id];
+    return item && item.file ? path.join(LIBRARY_DIR, path.basename(item.file)) : null;
+  }
+  if (kind === 'download') {
+    const safeName = path.basename(String(name || ''));
+    const dir = getDownloadsDir();
+    const filePath = path.join(dir, safeName);
+    if (!safeName || !AUDIO_EXTENSIONS.has(path.extname(safeName).toLowerCase()) || path.dirname(filePath) !== dir) return null;
+    return filePath;
+  }
+  if (kind === 'stream') {
+    const cleanId = cleanTrackId(id);
+    const entry = (cleanId && streamUrlCache.get(cleanId)) || streamUrlCache.get(String(id || '').toLowerCase());
+    const streamUrl = entry && entry.data && entry.data.streamUrl;
+    return isSafeMediaUrl(streamUrl) ? streamUrl : null;
+  }
+  return null;
+}
+
+async function handleAudioProbe(req, res, kind, id, name) {
+  const input = await resolveAudioProbeInput(kind, id, name);
+  if (!input) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ success: false, error: 'source not found' }));
+  }
+  const cached = audioProbeCache.get(input);
+  let result = cached && Date.now() - cached.at < 600000 ? cached.result : null;
+  if (!result) {
+    result = await runAudioProbe(input);
+    if (result.info) {
+      if (audioProbeCache.size > 200) audioProbeCache.delete(audioProbeCache.keys().next().value);
+      audioProbeCache.set(input, { at: Date.now(), result });
+    }
+  }
+  res.writeHead(result.info ? 200 : 500, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(result.info ? { success: true, source: kind, tool: result.tool, ...result.info } : { success: false, error: result.error }));
+}
+
 async function handleAudioProxy(req, res, targetUrl) {
   if (!targetUrl) {
     res.writeHead(400);
@@ -3956,6 +4029,8 @@ const TOKEN_PROTECTED_ROUTES = new Set([
   '/api/prefetch',
   '/api/check-cache',
   '/api/stream-info',
+  '/api/audio-probe',
+  '/api/audio-endpoints',
   '/api/track-analysis',
   '/api/tools-status',
   '/api/tools-install',
@@ -6082,6 +6157,16 @@ const server = http.createServer(async (req, res) => {
     const info = await getSystemAudioOutputInfo();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(info));
+  }
+
+  if (parsedUrl.pathname === '/api/audio-endpoints' && req.method === 'GET') {
+    const data = await getOutputEndpointFormats();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(data));
+  }
+
+  if (parsedUrl.pathname === '/api/audio-probe' && req.method === 'GET') {
+    return handleAudioProbe(req, res, String(parsedUrl.query.kind || ''), String(parsedUrl.query.id || ''), String(parsedUrl.query.name || ''));
   }
 
   if (parsedUrl.pathname === '/api/translate' && req.method === 'POST') {

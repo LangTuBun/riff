@@ -9191,3 +9191,43 @@ body.perf #sleep-timer-status.active::before {
 
 
 
+
+.aq-card { width: 860px; max-width: 94vw; max-height: 88vh; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+.aq-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.aq-title-group { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.aq-title-group h3 { margin: 0; }
+.aq-track { font-size: calc(12px * var(--font-scale, 1)); color: var(--md-sys-color-on-surface-variant); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.aq-chain { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 8px; align-items: stretch; }
+.aq-arrow { display: flex; align-items: center; color: var(--md-sys-color-outline); }
+.aq-stage { background: var(--md-sys-color-surface-container); border-radius: 20px; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.aq-stage-title, .aq-section-title { margin: 0; font-size: calc(11px * var(--font-scale, 1)); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--md-sys-color-on-surface-variant); }
+.aq-big { font-size: calc(20px * var(--font-scale, 1)); font-weight: 600; color: var(--md-sys-color-on-surface); font-variant-numeric: tabular-nums; line-height: 1.25; }
+.aq-sub { font-size: calc(12px * var(--font-scale, 1)); color: var(--md-sys-color-primary); min-height: 1.2em; }
+.aq-rows { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.aq-row { display: flex; justify-content: space-between; gap: 10px; font-size: calc(12px * var(--font-scale, 1)); color: var(--md-sys-color-on-surface-variant); }
+.aq-val { color: var(--md-sys-color-on-surface); text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.aq-section { display: flex; flex-direction: column; gap: 8px; }
+.aq-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.aq-chip { padding: 4px 10px; border-radius: var(--md-shape-corner-full, 999px); background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); font-size: calc(12px * var(--font-scale, 1)); }
+.aq-chip-warn { background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); }
+.aq-live { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: center; }
+.aq-meters { display: flex; flex-direction: column; gap: 10px; }
+.aq-meter-row { display: flex; align-items: center; gap: 10px; }
+.aq-meter-ch { width: 12px; font-size: calc(12px * var(--font-scale, 1)); font-weight: 600; color: var(--md-sys-color-on-surface-variant); }
+.aq-meter { position: relative; flex: 1; height: 10px; border-radius: 5px; background: var(--md-sys-color-surface-container-highest); overflow: hidden; }
+.aq-meter-rms { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--md-sys-color-primary); border-radius: 5px; }
+.aq-meter-peak { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--md-sys-color-on-surface); }
+.aq-meter-num { width: 44px; font-size: calc(12px * var(--font-scale, 1)); }
+.aq-stats { display: flex; flex-direction: column; gap: 4px; }
+.aq-spectrum-wrap { background: var(--md-sys-color-surface-container); border-radius: 16px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+#aq-spectrum { width: 100%; height: 120px; display: block; }
+.aq-spectrum-legend { display: flex; justify-content: space-between; gap: 10px; font-size: calc(12px * var(--font-scale, 1)); color: var(--md-sys-color-on-surface-variant); }
+.aq-footnote { margin: 0; font-size: calc(11px * var(--font-scale, 1)); color: var(--md-sys-color-outline); line-height: 1.45; }
+@media (max-width: 760px) {
+  .aq-chain { grid-template-columns: 1fr; }
+  .aq-arrow { justify-content: center; transform: rotate(90deg); }
+  .aq-live { grid-template-columns: 1fr; }
+}
+.aq-big { font-size: calc(18px * var(--font-scale, 1)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.aq-row > span:first-child { white-space: nowrap; flex-shrink: 0; }
+.aq-chip { border: 1px solid var(--md-sys-color-outline-variant); }

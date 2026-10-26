@@ -15439,6 +15439,11 @@ function bindCoverHoldZoom(wrapEl) {
         if (typeof toggleMiniWindow === 'function') toggleMiniWindow();
         return;
       }
+      if (e.code === 'KeyI') {
+        e.preventDefault();
+        openAudioQualityMonitor();
+        return;
+      }
     }
   }, true);
 
@@ -21635,6 +21640,348 @@ function bindCoverHoldZoom(wrapEl) {
   const btnCloseShortcutsModal = document.getElementById('btn-close-shortcuts-modal');
   if (btnOpenShortcuts && shortcutsModal) btnOpenShortcuts.addEventListener('click', () => openModal(shortcutsModal));
   if (btnCloseShortcutsModal && shortcutsModal) btnCloseShortcutsModal.addEventListener('click', () => closeModal(shortcutsModal));
+
+  const audioQualityModal = document.getElementById('audio-quality-modal');
+  const aqLib = window.RiffAudioQuality;
+  const aq = {
+    running: false, raf: 0, taps: null, srcKey: '', probe: null, quick: null, origin: '',
+    endpoints: null, endpointsAt: 0, device: null, deviceLabel: '',
+    spectrum: null, spectrumFrames: 0, cutoff: null, peakHold: -Infinity, clips: 0,
+    bytesMark: null, bitrate: null, lastSlow: 0, timeBuf: null, freqBuf: null
+  };
+  const aqEl = (id) => document.getElementById(id);
+  const aqSet = (id, text) => { const n = aqEl(id); if (n && n.textContent !== text) n.textContent = text; };
+  const aqDb = (lin) => (lin > 0 ? 20 * Math.log10(lin) : -Infinity);
+  const aqDbText = (db) => (Number.isFinite(db) ? `${db.toFixed(1)} dBFS` : '−∞');
+
+  function aqSourceKind(desc) {
+    if (desc.kind === 'cache') return { query: `kind=cache&id=${encodeURIComponent(desc.id)}`, origin: 'Offline cache' };
+    if (desc.kind === 'library') return { query: `kind=library&id=${encodeURIComponent(desc.id)}`, origin: 'Local library' };
+    if (desc.kind === 'download') return { query: `kind=download&name=${encodeURIComponent(desc.name)}`, origin: 'Downloads folder' };
+    const id = state.currentTrack && state.currentTrack.id ? state.currentTrack.id : '';
+    const origin = desc.kind === 'youtube' ? `YouTube ${desc.muxed ? 'video file' : 'stream'}${desc.itag ? ` (itag ${desc.itag})` : ''}`
+      : desc.kind === 'soundcloud' ? 'SoundCloud stream'
+      : desc.kind === 'hls' ? 'HLS stream' : 'Remote stream';
+    return { query: id ? `kind=stream&id=${encodeURIComponent(id)}` : '', origin };
+  }
+
+  async function aqLoadSource() {
+    const audio = el.nativeAudio;
+    const src = audio ? (audio.currentSrc || audio.src || '') : '';
+    const key = `${src}|${state.currentTrack ? state.currentTrack.id : ''}`;
+    if (key === aq.srcKey) return;
+    aq.srcKey = key;
+    aq.probe = null;
+    aq.spectrum = null;
+    aq.spectrumFrames = 0;
+    aq.cutoff = null;
+    aq.bytesMark = null;
+    aq.bitrate = null;
+    aq.peakHold = -Infinity;
+    aq.clips = 0;
+    const t = state.currentTrack;
+    aqSet('aq-track', t ? [t.artist, t.title].filter(Boolean).join(' — ') || '—' : 'Nothing playing');
+    if (!src) { aq.quick = null; aq.origin = ''; return; }
+    const desc = aqLib.describeStreamSrc(src);
+    aq.quick = desc.kind === 'youtube' ? desc : null;
+    if (desc.kind === 'hls' && hlsInstance && Array.isArray(hlsInstance.levels)) {
+      const lvl = hlsInstance.levels[Math.max(0, hlsInstance.currentLevel)];
+      if (lvl) aq.quick = { codec: String(lvl.audioCodec || '').split('.')[0], bitrate: lvl.bitrate || null };
+    }
+    const { query, origin } = aqSourceKind(desc);
+    aq.origin = origin;
+    if (!query || !state.serverPort) return;
+    try {
+      const res = await fetch(`http://127.0.0.1:${state.serverPort}/api/audio-probe?${query}`);
+      const data = await res.json();
+      if (aq.srcKey === key && data && data.success) aq.probe = data;
+    } catch (e) {}
+  }
+
+  async function aqLoadDevice() {
+    let label = '';
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const outs = devices.filter(d => d.kind === 'audiooutput');
+      const sinkId = el.nativeAudio && el.nativeAudio.sinkId ? el.nativeAudio.sinkId : 'default';
+      const dev = outs.find(d => d.deviceId === sinkId) || outs.find(d => d.deviceId === 'default') || outs[0];
+      label = dev && dev.label ? dev.label : '';
+    } catch (e) {}
+    aq.deviceLabel = label.replace(/^(Default|Communications)\s*[-–—:]\s*/i, '').trim();
+    if (!aq.endpoints || Date.now() - aq.endpointsAt > 15000) {
+      try {
+        const res = await fetch(`http://127.0.0.1:${state.serverPort}/api/audio-endpoints`);
+        aq.endpoints = await res.json();
+        aq.endpointsAt = Date.now();
+      } catch (e) { aq.endpoints = null; }
+    }
+    aq.device = aq.endpoints && aq.endpoints.supported ? aqLib.matchEndpoint(label, aq.endpoints.endpoints) : null;
+  }
+
+  function aqSourceInfo() {
+    const p = aq.probe;
+    const q = aq.quick || {};
+    return {
+      codec: p ? p.codec : q.codec || '',
+      profile: p ? p.profile : q.profile || '',
+      container: p ? p.container : q.container || '',
+      sampleRate: p ? p.sampleRate : q.sampleRate || null,
+      bitrate: p ? p.bitrate : q.bitrate || null,
+      bitDepth: p ? p.bitDepth : null,
+      channels: p ? p.channels : null,
+      channelLayout: p ? p.channelLayout : '',
+      lossless: p ? p.lossless : false,
+      exact: !!p
+    };
+  }
+
+  function aqRenderStatic() {
+    const { formatRate, formatKbps } = aqLib;
+    const ctx = audioEngine.ctx;
+    const s = aqSourceInfo();
+    const codecName = s.codec ? s.codec.toUpperCase().replace(/^PCM_.*/, 'PCM') : '';
+
+    if (!aq.srcKey || !el.nativeAudio || !(el.nativeAudio.currentSrc || el.nativeAudio.src)) {
+      aqSet('aq-src-main', '—');
+      aqSet('aq-src-sub', 'Nothing playing');
+    } else {
+      aqSet('aq-src-main', [s.sampleRate ? formatRate(s.sampleRate) : '', codecName].filter(Boolean).join(' · ') || 'Probing…');
+      aqSet('aq-src-sub', s.codec ? `${s.lossless ? 'Lossless' : 'Lossy'}${s.exact ? '' : ' · estimated from stream URL'}` : 'Probing…');
+    }
+    aqSet('aq-src-codec', s.codec ? [codecName, s.profile, s.container ? `in ${s.container}` : ''].filter(Boolean).join(' ') : '—');
+    aqSet('aq-src-depth', s.lossless ? (s.bitDepth ? `${s.bitDepth}-bit integer` : 'unknown') : s.codec ? 'n/a (lossy, decoded to float)' : '—');
+    aqSet('aq-src-bitrate', formatKbps(s.bitrate));
+    aqSet('aq-src-channels', s.channels ? `${s.channels}${s.channelLayout ? ` (${s.channelLayout})` : ''}` : '—');
+    aqSet('aq-src-origin', aq.origin || '—');
+
+    if (!ctx) {
+      ['aq-eng-main', 'aq-eng-format', 'aq-eng-resample', 'aq-eng-speed', 'aq-eng-latency'].forEach(id => aqSet(id, '—'));
+      aqSet('aq-eng-sub', 'Starts with playback');
+      aqSet('aq-eng-state', 'not started');
+    } else {
+      const rate = ctx.sampleRate;
+      aqSet('aq-eng-main', `32-bit float · ${formatRate(rate)}`);
+      aqSet('aq-eng-sub', 'Web Audio graph');
+      aqSet('aq-eng-format', `float32, ${ctx.destination.channelCount} ch`);
+      aqSet('aq-eng-resample', !s.sampleRate ? '—' : s.sampleRate === rate ? 'none' : `${formatRate(s.sampleRate)} → ${formatRate(rate)}`);
+      const proc = audioEngine.getProcessingState();
+      aqSet('aq-eng-speed', Math.abs(proc.playbackRate - 1) < 0.001 ? '1.00×' : `${proc.playbackRate.toFixed(2)}× (${proc.preservesPitch ? 'time-stretched' : 'resampled, pitch shifted'})`);
+      const lat = (ctx.baseLatency || 0) + (ctx.outputLatency || 0);
+      aqSet('aq-eng-latency', lat ? `${(lat * 1000).toFixed(1)} ms` : '—');
+      aqSet('aq-eng-state', ctx.state === 'suspended' ? 'suspended (meters paused)' : ctx.state);
+    }
+
+    const d = aq.device;
+    const f = d && d.format;
+    aqSet('aq-dev-name', aq.deviceLabel || 'System default');
+    if (f) {
+      const depth = f.float ? '32-bit float' : f.validBits === f.containerBits ? `${f.validBits}-bit` : `${f.validBits}-bit in ${f.containerBits}`;
+      aqSet('aq-dev-main', `${depth} · ${formatRate(f.sampleRate)}`);
+      const rateNote = ctx && ctx.sampleRate !== f.sampleRate ? `Windows resamples ${formatRate(ctx.sampleRate)} → ${formatRate(f.sampleRate)}` : 'Default format in Windows Sound settings';
+      aqSet('aq-dev-sub', rateNote);
+      aqSet('aq-dev-format', f.float ? 'IEEE float' : `PCM, ${f.containerBits}-bit container`);
+      aqSet('aq-dev-channels', String(f.channels));
+    } else {
+      aqSet('aq-dev-main', ctx ? formatRate(ctx.sampleRate) : '—');
+      aqSet('aq-dev-sub', aq.endpoints && !aq.endpoints.supported ? 'Bit depth not exposed on this OS' : 'Device format not found');
+      aqSet('aq-dev-format', '—');
+      aqSet('aq-dev-channels', ctx ? String(ctx.destination.maxChannelCount) : '—');
+    }
+    aqSet('aq-dev-mixer', navigator.userAgent.includes('Windows') ? 'WASAPI shared, float32' : 'OS mixer');
+
+    if (ctx) {
+      const proc = audioEngine.getProcessingState();
+      const chips = [['Limiter −2 dBFS (always on)', 'warn']];
+      if (Math.abs(proc.normGainDb) > 0.05) chips.push([`Normalization ${proc.normGainDb > 0 ? '+' : ''}${proc.normGainDb.toFixed(1)} dB`, '']);
+      if (Math.abs(proc.preampGain - 1) > 0.001) chips.push([`Preamp ${aqDb(proc.preampGain).toFixed(1)} dB`, '']);
+      if (proc.elementVolume < 0.999) chips.push([`Volume ${Math.round(proc.elementVolume * 100)}% (digital)`, '']);
+      if (proc.hq) chips.push([`Enhancer: ${proc.hq}`, '']);
+      if (proc.eq) chips.push(['Equalizer', '']);
+      if (proc.reverb) chips.push([`Reverb ${proc.reverb}%`, '']);
+      if (proc.echo) chips.push([`Echo ${proc.echo}%`, '']);
+      if (proc.distortion) chips.push([`Distortion ${proc.distortion}%`, '']);
+      if (Math.abs(proc.playbackRate - 1) >= 0.001) chips.push([`Speed ${proc.playbackRate.toFixed(2)}×`, '']);
+      if (s.sampleRate && s.sampleRate !== ctx.sampleRate) chips.push([`Resampler ${aqLib.formatRate(s.sampleRate)} → ${aqLib.formatRate(ctx.sampleRate)}`, '']);
+      const sig = chips.map(c => c.join(':')).join('|');
+      const host = aqEl('aq-processing');
+      if (host && host.dataset.sig !== sig) {
+        host.dataset.sig = sig;
+        host.replaceChildren(...chips.map(([text, tone]) => {
+          const chip = document.createElement('span');
+          chip.className = `aq-chip${tone ? ` aq-chip-${tone}` : ''}`;
+          chip.textContent = text;
+          return chip;
+        }));
+      }
+    }
+
+    const audio = el.nativeAudio;
+    if (audio && audio.buffered && audio.buffered.length) {
+      let ahead = 0;
+      for (let i = 0; i < audio.buffered.length; i++) {
+        if (audio.buffered.start(i) <= audio.currentTime && audio.buffered.end(i) >= audio.currentTime) ahead = audio.buffered.end(i) - audio.currentTime;
+      }
+      aqSet('aq-buffered', `${ahead.toFixed(1)} s`);
+    } else {
+      aqSet('aq-buffered', '—');
+    }
+    if (audio && typeof audio.webkitAudioDecodedByteCount === 'number' && !audio.paused) {
+      const now = { bytes: audio.webkitAudioDecodedByteCount, t: audio.currentTime };
+      const m = aq.bytesMark;
+      if (m && now.t - m.t >= 3 && now.bytes >= m.bytes) {
+        aq.bitrate = (now.bytes - m.bytes) * 8 / (now.t - m.t);
+        aq.bytesMark = now;
+      } else if (!m || now.t < m.t || now.bytes < m.bytes) {
+        aq.bytesMark = now;
+      }
+    }
+    aqSet('aq-live-bitrate', aq.bitrate ? aqLib.formatKbps(aq.bitrate) : 'measuring…');
+
+    if (aq.cutoff) {
+      const nyq = Math.min(s.sampleRate || Infinity, ctx ? ctx.sampleRate : Infinity);
+      aqSet('aq-bandwidth', `content up to ~${(aq.cutoff / 1000).toFixed(1)} kHz · ${aqLib.describeBandwidth(aq.cutoff, nyq)}`);
+    } else {
+      aqSet('aq-bandwidth', 'measuring…');
+    }
+  }
+
+  function aqMeter(side, analyser) {
+    if (!aq.timeBuf || aq.timeBuf.length !== analyser.fftSize) aq.timeBuf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(aq.timeBuf);
+    let peak = 0;
+    let sum = 0;
+    for (let i = 0; i < aq.timeBuf.length; i++) {
+      const v = Math.abs(aq.timeBuf[i]);
+      if (v > peak) peak = v;
+      sum += v * v;
+    }
+    const rmsDb = aqDb(Math.sqrt(sum / aq.timeBuf.length));
+    const peakDb = aqDb(peak);
+    const pct = (db) => `${Math.max(0, Math.min(100, (db + 60) / 60 * 100))}%`;
+    aqEl(`aq-meter-${side}-rms`).style.width = Number.isFinite(rmsDb) ? pct(rmsDb) : '0%';
+    aqEl(`aq-meter-${side}-peak`).style.left = Number.isFinite(peakDb) ? pct(peakDb) : '0%';
+    aqSet(`aq-meter-${side}-num`, Number.isFinite(peakDb) ? peakDb.toFixed(1) : '−∞');
+    return peak;
+  }
+
+  function aqDrawSpectrum(rate) {
+    const canvas = aqEl('aq-spectrum');
+    if (!canvas || !aq.spectrum) return;
+    const w = canvas.clientWidth * (window.devicePixelRatio || 1);
+    const h = canvas.clientHeight * (window.devicePixelRatio || 1);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    const g = canvas.getContext('2d');
+    const css = getComputedStyle(document.documentElement);
+    const lineColor = css.getPropertyValue('--md-sys-color-primary').trim() || '#8ab4f8';
+    const gridColor = css.getPropertyValue('--md-sys-color-outline-variant').trim() || 'rgba(128,128,128,.3)';
+    const textColor = css.getPropertyValue('--md-sys-color-on-surface-variant').trim() || '#999';
+    g.clearRect(0, 0, w, h);
+    const nyq = rate / 2;
+    const fMin = 20;
+    const xOf = (f) => Math.log(f / fMin) / Math.log(nyq / fMin) * w;
+    const yOf = (db) => Math.max(0, Math.min(h, (-db / 130) * h));
+    g.strokeStyle = gridColor;
+    g.fillStyle = textColor;
+    g.lineWidth = 1;
+    g.font = `${10 * (window.devicePixelRatio || 1)}px sans-serif`;
+    [100, 1000, 10000, 20000].forEach(f => {
+      if (f >= nyq) return;
+      const x = xOf(f);
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+      g.fillText(f >= 1000 ? `${f / 1000}k` : String(f), x + 3, h - 4);
+    });
+    const bins = aq.spectrum;
+    const hzPerBin = nyq / bins.length;
+    g.beginPath();
+    let started = false;
+    for (let px = 0; px < w; px += 1) {
+      const f = fMin * Math.pow(nyq / fMin, px / w);
+      const i = Math.min(bins.length - 1, Math.max(1, Math.round(f / hzPerBin)));
+      const y = yOf(bins[i]);
+      if (!started) { g.moveTo(px, y); started = true; } else g.lineTo(px, y);
+    }
+    g.strokeStyle = lineColor;
+    g.lineWidth = 1.5 * (window.devicePixelRatio || 1);
+    g.stroke();
+    g.lineTo(w, h); g.lineTo(0, h); g.closePath();
+    g.globalAlpha = 0.15; g.fillStyle = lineColor; g.fill(); g.globalAlpha = 1;
+    if (aq.cutoff && aq.cutoff < nyq) {
+      const x = xOf(aq.cutoff);
+      g.setLineDash([4, 4]);
+      g.strokeStyle = textColor;
+      g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+      g.setLineDash([]);
+    }
+  }
+
+  function aqTick(ts) {
+    if (!aq.running) return;
+    aq.raf = requestAnimationFrame(aqTick);
+    const ctx = audioEngine.ctx;
+    if (!aq.taps && audioEngine.graphInitialized) aq.taps = audioEngine.attachQualityMonitor();
+    if (ts - aq.lastSlow > 500) {
+      aq.lastSlow = ts;
+      aqLoadSource();
+      aqRenderStatic();
+    }
+    if (!aq.taps || !ctx || ctx.state !== 'running' || !el.nativeAudio || el.nativeAudio.paused) return;
+    const peak = Math.max(aqMeter('l', aq.taps.left), aqMeter('r', aq.taps.right));
+    if (peak >= 0.9999) aq.clips++;
+    const peakDb = aqDb(peak);
+    if (peakDb > aq.peakHold) aq.peakHold = peakDb;
+    aqSet('aq-peak-hold', aqDbText(aq.peakHold));
+    aqSet('aq-clips', String(aq.clips));
+
+    const an = aq.taps.source;
+    if (!aq.freqBuf || aq.freqBuf.length !== an.frequencyBinCount) aq.freqBuf = new Float32Array(an.frequencyBinCount);
+    an.getFloatFrequencyData(aq.freqBuf);
+    let loud = -Infinity;
+    for (let i = 0; i < aq.freqBuf.length; i += 16) if (aq.freqBuf[i] > loud) loud = aq.freqBuf[i];
+    if (loud > -100) {
+      if (!aq.spectrum || aq.spectrum.length !== aq.freqBuf.length) aq.spectrum = Float32Array.from(aq.freqBuf, v => (Number.isFinite(v) ? v : -140));
+      const k = aq.spectrumFrames < 30 ? 1 / (aq.spectrumFrames + 1) : 0.03;
+      for (let i = 0; i < aq.freqBuf.length; i++) {
+        const v = Number.isFinite(aq.freqBuf[i]) ? aq.freqBuf[i] : -140;
+        aq.spectrum[i] += (v - aq.spectrum[i]) * k;
+      }
+      aq.spectrumFrames++;
+      if (aq.spectrumFrames > 45 && aq.spectrumFrames % 20 === 0) aq.cutoff = aqLib.estimateBandwidth(aq.spectrum, ctx.sampleRate);
+    }
+    aqDrawSpectrum(ctx.sampleRate);
+  }
+
+  function stopAudioQualityMonitor() {
+    aq.running = false;
+    if (aq.raf) cancelAnimationFrame(aq.raf);
+    aq.raf = 0;
+    audioEngine.detachQualityMonitor();
+    aq.taps = null;
+  }
+
+  function openAudioQualityMonitor() {
+    if (!audioQualityModal || !aqLib) return;
+    if (audioQualityModal.classList.contains('visible')) { closeModal(audioQualityModal); return; }
+    aq.srcKey = '';
+    aq.lastSlow = 0;
+    openModal(audioQualityModal);
+    aqLoadDevice().then(aqRenderStatic);
+    if (!aq.running) {
+      aq.running = true;
+      aq.raf = requestAnimationFrame(aqTick);
+    }
+  }
+
+  if (audioQualityModal) {
+    new MutationObserver(() => {
+      if (audioQualityModal.classList.contains('hidden') && aq.running) stopAudioQualityMonitor();
+    }).observe(audioQualityModal, { attributes: true, attributeFilter: ['class'] });
+    audioQualityModal.addEventListener('click', (e) => { if (e.target === audioQualityModal) closeModal(audioQualityModal); });
+    const btnCloseAq = document.getElementById('btn-close-audio-quality');
+    if (btnCloseAq) btnCloseAq.addEventListener('click', () => closeModal(audioQualityModal));
+    const btnOpenAq = document.getElementById('btn-open-audio-quality');
+    if (btnOpenAq) btnOpenAq.addEventListener('click', openAudioQualityMonitor);
+    if (navigator.mediaDevices) navigator.mediaDevices.addEventListener('devicechange', () => { aq.endpoints = null; if (aq.running) aqLoadDevice(); });
+  }
 
   const btnCopyDiagnostics = document.getElementById('btn-copy-diagnostics');
   if (btnCopyDiagnostics) {

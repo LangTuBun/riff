@@ -1,4 +1,4 @@
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 
 function getSystemAudioOutputInfo() {
   return new Promise((resolve) => {
@@ -80,4 +80,34 @@ function getSystemAudioOutputInfo() {
   });
 }
 
-module.exports = { getSystemAudioOutputInfo };
+const { buildEndpointList } = require('./audio-quality');
+
+const RENDER_KEY = 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render';
+const ENDPOINT_PROPS = [
+  '{a45c254e-df1c-4efd-8020-67d146a850e0},2',
+  '{b3f8fa53-0004-438e-9003-51a46e139bfc},6',
+  '{f19f064d-082c-4e27-bc73-6882a1bb8e4c},0'
+];
+let endpointCache = null;
+
+function regQuery(args) {
+  return new Promise((resolve) => {
+    execFile('reg', ['query', RENDER_KEY, ...args], { timeout: 3000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      resolve(err ? '' : stdout);
+    });
+  });
+}
+
+async function getOutputEndpointFormats() {
+  if (process.platform !== 'win32') return { supported: false, endpoints: [] };
+  if (endpointCache && Date.now() - endpointCache.at < 15000) return endpointCache.data;
+  const [states, ...props] = await Promise.all([
+    regQuery(['/s', '/v', 'DeviceState']),
+    ...ENDPOINT_PROPS.map(v => regQuery(['/s', '/v', v]))
+  ]);
+  const data = { supported: true, endpoints: buildEndpointList(states, props.join('\n')) };
+  endpointCache = { at: Date.now(), data };
+  return data;
+}
+
+module.exports = { getSystemAudioOutputInfo, getOutputEndpointFormats };

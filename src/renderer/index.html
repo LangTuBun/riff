@@ -1980,6 +1980,13 @@
 
             <div class="setting-item">
               <div class="setting-item-top" style="align-items: center; justify-content: space-between;">
+                <span class="setting-name">Audio quality</span>
+                <button class="btn-outline-pill" id="btn-open-audio-quality" style="padding: 6px 14px; font-size: calc(12px * var(--font-scale, 1));">Open monitor</button>
+              </div>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-item-top" style="align-items: center; justify-content: space-between;">
                 <span class="setting-name">Logs</span>
                 <button class="btn-outline-pill" id="btn-open-logs" style="padding: 6px 14px; font-size: calc(12px * var(--font-scale, 1));">Open logs folder</button>
               </div>
@@ -3076,8 +3083,90 @@
         <div style="display: flex; justify-content: space-between; align-items: center;"><span>TV Karaoke</span><div style="display: flex; align-items: center; gap: 6px;"><span class="keycap">F</span></div></div>
         <div style="display: flex; justify-content: space-between; align-items: center;"><span>Mini player</span><div style="display: flex; align-items: center; gap: 6px;"><span class="keycap">P</span></div></div>
         <div style="display: flex; justify-content: space-between; align-items: center;"><span>Search</span><div style="display: flex; align-items: center; gap: 6px;"><span class="keycap">/</span><span style="color: var(--md-sys-color-on-surface-variant);">or</span><span class="keycap wide">Ctrl</span><span style="color: var(--md-sys-color-on-surface-variant);">+</span><span class="keycap">K</span></div></div>
+        <div style="display: flex; justify-content: space-between; align-items: center;"><span>Audio quality monitor</span><div style="display: flex; align-items: center; gap: 6px;"><span class="keycap">I</span></div></div>
         <div style="display: flex; justify-content: space-between; align-items: center;"><span>Close / Blur</span><div style="display: flex; align-items: center; gap: 6px;"><span class="keycap wide">Esc</span></div></div>
       </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="audio-quality-modal">
+    <div class="dialog-card aq-card">
+      <div class="aq-header">
+        <div class="aq-title-group">
+          <h3>Audio quality</h3>
+          <span class="aq-track" id="aq-track">—</span>
+        </div>
+        <button class="btn-icon-pill" id="btn-close-audio-quality" title="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </div>
+
+      <div class="aq-chain">
+        <div class="aq-stage">
+          <p class="aq-stage-title">Source</p>
+          <div class="aq-big" id="aq-src-main">—</div>
+          <div class="aq-sub" id="aq-src-sub">—</div>
+          <div class="aq-rows">
+            <div class="aq-row"><span>Codec</span><span class="aq-val" id="aq-src-codec">—</span></div>
+            <div class="aq-row"><span>Bit depth</span><span class="aq-val" id="aq-src-depth">—</span></div>
+            <div class="aq-row"><span>Bitrate</span><span class="aq-val" id="aq-src-bitrate">—</span></div>
+            <div class="aq-row"><span>Channels</span><span class="aq-val" id="aq-src-channels">—</span></div>
+            <div class="aq-row"><span>From</span><span class="aq-val" id="aq-src-origin">—</span></div>
+          </div>
+        </div>
+        <div class="aq-arrow" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="aq-stage">
+          <p class="aq-stage-title">Riff engine</p>
+          <div class="aq-big" id="aq-eng-main">—</div>
+          <div class="aq-sub" id="aq-eng-sub">—</div>
+          <div class="aq-rows">
+            <div class="aq-row"><span>Format</span><span class="aq-val" id="aq-eng-format">—</span></div>
+            <div class="aq-row"><span>Resampling</span><span class="aq-val" id="aq-eng-resample">—</span></div>
+            <div class="aq-row"><span>Speed</span><span class="aq-val" id="aq-eng-speed">—</span></div>
+            <div class="aq-row"><span>Latency</span><span class="aq-val" id="aq-eng-latency">—</span></div>
+            <div class="aq-row"><span>State</span><span class="aq-val" id="aq-eng-state">—</span></div>
+          </div>
+        </div>
+        <div class="aq-arrow" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+        <div class="aq-stage">
+          <p class="aq-stage-title">Output device</p>
+          <div class="aq-big" id="aq-dev-main">—</div>
+          <div class="aq-sub" id="aq-dev-sub">—</div>
+          <div class="aq-rows">
+            <div class="aq-row"><span>Device</span><span class="aq-val" id="aq-dev-name">—</span></div>
+            <div class="aq-row"><span>Mixer</span><span class="aq-val" id="aq-dev-mixer">—</span></div>
+            <div class="aq-row"><span>Device format</span><span class="aq-val" id="aq-dev-format">—</span></div>
+            <div class="aq-row"><span>Channels</span><span class="aq-val" id="aq-dev-channels">—</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="aq-section">
+        <p class="aq-section-title">Processing in the path</p>
+        <div class="aq-chips" id="aq-processing"></div>
+      </div>
+
+      <div class="aq-section">
+        <p class="aq-section-title">Live signal</p>
+        <div class="aq-live">
+          <div class="aq-meters">
+            <div class="aq-meter-row"><span class="aq-meter-ch">L</span><div class="aq-meter"><div class="aq-meter-rms" id="aq-meter-l-rms"></div><div class="aq-meter-peak" id="aq-meter-l-peak"></div></div><span class="aq-val aq-meter-num" id="aq-meter-l-num">—</span></div>
+            <div class="aq-meter-row"><span class="aq-meter-ch">R</span><div class="aq-meter"><div class="aq-meter-rms" id="aq-meter-r-rms"></div><div class="aq-meter-peak" id="aq-meter-r-peak"></div></div><span class="aq-val aq-meter-num" id="aq-meter-r-num">—</span></div>
+          </div>
+          <div class="aq-stats">
+            <div class="aq-row"><span>Peak hold</span><span class="aq-val" id="aq-peak-hold">—</span></div>
+            <div class="aq-row"><span>Clipped frames</span><span class="aq-val" id="aq-clips">0</span></div>
+            <div class="aq-row"><span>Measured bitrate</span><span class="aq-val" id="aq-live-bitrate">—</span></div>
+            <div class="aq-row"><span>Buffered ahead</span><span class="aq-val" id="aq-buffered">—</span></div>
+          </div>
+        </div>
+        <div class="aq-spectrum-wrap">
+          <canvas id="aq-spectrum" height="120"></canvas>
+          <div class="aq-spectrum-legend"><span>Source spectrum</span><span class="aq-val" id="aq-bandwidth">measuring…</span></div>
+        </div>
+      </div>
+
+      <p class="aq-footnote">Web Audio always processes in 32-bit float at the engine rate, and the volume limiter is always in the path, so playback is never bit-perfect. Bandwidth is estimated from the spectrum.</p>
     </div>
   </div>
 
@@ -3513,6 +3602,7 @@
 
   <script src="../../assets/hls.min.js"></script>
   <script src="audio.js"></script>
+  <script src="../shared/audio-quality.js"></script>
   <script src="shapes.js"></script>
   <script src="lyrics-rtl.js"></script>
   <script src="track-sort.js"></script>
