@@ -1987,6 +1987,13 @@
 
             <div class="setting-item">
               <div class="setting-item-top" style="align-items: center; justify-content: space-between;">
+                <span class="setting-name">Lossless downloads</span>
+                <button class="btn-outline-pill" id="btn-open-lossless" style="padding: 6px 14px; font-size: calc(12px * var(--font-scale, 1));">Manage</button>
+              </div>
+            </div>
+
+            <div class="setting-item">
+              <div class="setting-item-top" style="align-items: center; justify-content: space-between;">
                 <span class="setting-name">Logs</span>
                 <button class="btn-outline-pill" id="btn-open-logs" style="padding: 6px 14px; font-size: calc(12px * var(--font-scale, 1));">Open logs folder</button>
               </div>
@@ -3089,6 +3096,54 @@
     </div>
   </div>
 
+  <div class="modal-backdrop hidden" id="lossless-modal">
+    <div class="dialog-card ll-card">
+      <div class="aq-header">
+        <div class="aq-title-group">
+          <h3>Lossless downloads</h3>
+          <span class="aq-track" id="ll-modal-status">—</span>
+        </div>
+        <button class="btn-icon-pill" id="btn-close-lossless" title="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </div>
+
+      <div class="aq-section">
+        <p class="aq-section-title">1. Downloader</p>
+        <div class="ll-row">
+          <div class="ll-row-text">
+            <span>sockseek, an open-source Soulseek downloader (about 110 MB, checksum verified)</span>
+            <span class="ll-sub" id="ll-install-state">—</span>
+          </div>
+          <button class="btn-outline-pill" id="btn-ll-install">Install</button>
+        </div>
+      </div>
+
+      <div class="aq-section">
+        <p class="aq-section-title">2. Soulseek account</p>
+        <p class="ll-hint">Any free Soulseek account works. Use a separate one if you also run another Soulseek client. The password is stored encrypted on this device.</p>
+        <div class="ll-account" id="ll-account-form">
+          <input type="text" class="pill-text-input" id="ll-username" placeholder="Username" autocomplete="off" spellcheck="false">
+          <input type="password" class="pill-text-input" id="ll-password" placeholder="Password" autocomplete="off">
+          <button class="btn-pill-primary" id="btn-ll-save-account">Save</button>
+        </div>
+        <div class="ll-row hidden" id="ll-account-saved">
+          <div class="ll-row-text">
+            <span class="ll-sub" id="ll-account-name">—</span>
+          </div>
+          <button class="btn-text-error" id="btn-ll-clear-account">Sign out</button>
+        </div>
+      </div>
+
+      <div class="aq-section">
+        <p class="aq-section-title">Downloads</p>
+        <div class="ll-jobs" id="ll-modal-jobs"></div>
+      </div>
+
+      <p class="aq-footnote">Soulseek is a peer-to-peer network: files come from other users, so availability and speed vary. Downloading music you do not own may be illegal where you live.</p>
+    </div>
+  </div>
+
   <div class="modal-backdrop hidden" id="audio-quality-modal">
     <div class="dialog-card aq-card">
       <div class="aq-header">
@@ -3188,7 +3243,22 @@
         </div>
       </div>
 
-      <div class="dl-mode-tabs" id="dl-mode-tabs"><button type="button" class="dl-mode-tab active" data-dl-tab="download" data-i18n>Download file</button><button type="button" class="dl-mode-tab" data-dl-tab="trim"><span data-i18n>Trim best part</span><span class="riff-beta-badge" style="margin-left:6px;">NEW</span></button></div>
+      <div class="dl-mode-tabs" id="dl-mode-tabs"><button type="button" class="dl-mode-tab active" data-dl-tab="download" data-i18n>Download file</button><button type="button" class="dl-mode-tab" data-dl-tab="trim"><span data-i18n>Trim best part</span><span class="riff-beta-badge" style="margin-left:6px;">NEW</span></button><button type="button" class="dl-mode-tab" data-dl-tab="lossless"><span data-i18n>Lossless</span></button></div>
+
+      <div id="dl-pane-lossless" class="hidden">
+        <div class="download-section">
+          <span class="download-section-label">Real lossless from Soulseek</span>
+          <p class="ll-hint">Finds a genuine FLAC or WAV copy shared on Soulseek and adds it to your local library. Nothing is converted, and files that are not truly lossless are rejected.</p>
+          <div class="ll-status-line" id="ll-pane-status">—</div>
+        </div>
+        <div class="ll-jobs" id="ll-pane-jobs"></div>
+        <div class="download-modal-actions">
+          <button class="btn-outline-pill" id="btn-ll-open-setup">Set up</button>
+          <div class="download-actions-right">
+            <button class="btn-pill-primary" id="btn-ll-find"><span>Find lossless copy</span></button>
+          </div>
+        </div>
+      </div>
 
       <div id="dl-pane-download">
         <div class="download-section">

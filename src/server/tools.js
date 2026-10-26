@@ -152,6 +152,72 @@ async function installFfmpeg() {
   }
 }
 
+const SOCKSEEK_VERSION = '3.0.6';
+const SOCKSEEK_ASSETS = {
+  'win32-x64': { name: 'sockseek_3.0.6_win-x64.zip', sha256: 'aa965bdf3bc9b04757380889e1ce96ce1d57fdf89423fb3f7ebf378e469e66c4' },
+  'linux-x64': { name: 'sockseek_3.0.6_linux-x64.tar.gz', sha256: '91d7d14fa1293afe94ccb0299e0103f8477a558223f62f4027f5712e4bbf521a' },
+  'linux-arm': { name: 'sockseek_3.0.6_linux-arm.tar.gz', sha256: 'd45b87720b6ab006e471f79055ea3865020fae0761b3e9100731729bdff9f7ea' },
+  'darwin-arm64': { name: 'sockseek_3.0.6_osx-arm64.tar.gz', sha256: 'b7b9602b3ea0d8724b2a4dd1370c97f2f1f7175f901e7088dad714352c4926d9' },
+  'darwin-x64': { name: 'sockseek_3.0.6_osx-x64.tar.gz', sha256: '6211374e1fca1f0b0bb4bfc6395e493c5969416e116a976f87bac4bdb99320fd' }
+};
+const sockseekState = { status: 'idle', percent: 0, error: '' };
+
+function sockseekAsset() {
+  return SOCKSEEK_ASSETS[`${process.platform}-${process.arch}`] || null;
+}
+
+async function installSockseek() {
+  if (sockseekState.status === 'downloading') return;
+  const asset = sockseekAsset();
+  if (!asset) throw new Error('No sockseek build for this system');
+  fs.mkdirSync(BIN_DIR, { recursive: true });
+  sockseekState.status = 'downloading';
+  sockseekState.percent = 0;
+  sockseekState.error = '';
+  const archive = path.join(os.tmpdir(), `riff-${asset.name}`);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'riff-sockseek-'));
+  try {
+    const res = await get(`https://github.com/fiso64/sockseek/releases/download/v${SOCKSEEK_VERSION}/${asset.name}`);
+    const total = Number(res.headers['content-length']) || 0;
+    let done = 0;
+    const hash = crypto.createHash('sha256');
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(archive);
+      res.on('data', (c) => {
+        hash.update(c);
+        done += c.length;
+        if (total) sockseekState.percent = Math.round((done / total) * 100);
+      });
+      res.on('error', reject);
+      out.on('error', reject);
+      out.on('finish', resolve);
+      res.pipe(out);
+    });
+    if (hash.digest('hex') !== asset.sha256) throw new Error('sockseek checksum mismatch');
+    const sysTar = IS_WIN && path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+    await run(sysTar && fs.existsSync(sysTar) ? sysTar : 'tar', ['-xf', archive, '-C', work]);
+    const exe = IS_WIN ? 'sockseek.exe' : 'sockseek';
+    const src = findFile(work, exe);
+    if (!src) throw new Error(`${exe} not found inside the archive`);
+    const dest = path.join(BIN_DIR, exe);
+    fs.copyFileSync(src, dest);
+    if (!IS_WIN) fs.chmodSync(dest, 0o755);
+    clearBinaryCache();
+    sockseekState.status = 'done';
+  } catch (e) {
+    try { logger.error('sockseek download failed', e); } catch (_) {}
+    sockseekState.status = 'error';
+    sockseekState.error = e.message;
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+    fs.rmSync(archive, { force: true });
+  }
+}
+
+function sockseekInstallStatus() {
+  return { installed: !!resolveBinary('sockseek'), supported: !!sockseekAsset(), version: SOCKSEEK_VERSION, ...sockseekState };
+}
+
 function toolsStatus() {
   return {
     ytDlp: !!resolveBinary('yt-dlp'),
@@ -194,4 +260,4 @@ async function updateYtDlpIfManaged() {
   }
 }
 
-module.exports = { ensureTools, toolsStatus, updateYtDlpIfManaged, expectedHash, ytDlpAsset, ffmpegAsset };
+module.exports = { ensureTools, toolsStatus, updateYtDlpIfManaged, expectedHash, ytDlpAsset, ffmpegAsset, installSockseek, sockseekInstallStatus };

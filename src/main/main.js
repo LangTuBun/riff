@@ -727,7 +727,10 @@ function runGUI() {
       ipcMain.on('media-keys-active', () => { if (!mediaKeysActive) { mediaKeysActive = true; registerMediaKeys(); } });
       powerMonitor.on('resume', registerMediaKeys);
       powerMonitor.on('unlock-screen', registerMediaKeys);
-      app.on('will-quit', () => globalShortcut.unregisterAll());
+      app.on('will-quit', () => {
+        globalShortcut.unregisterAll();
+        require('../server/sockseek').stopDaemon();
+      });
 
       let preMiniLyricsH = null;
       ipcMain.removeHandler('toggle-mini-window');

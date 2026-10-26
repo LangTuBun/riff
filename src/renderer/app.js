@@ -18430,8 +18430,10 @@ function bindCoverHoldZoom(wrapEl) {
     dlTabs.forEach(t => t.classList.toggle('active', t.dataset.dlTab === 'download'));
     const dlPaneDownload = document.getElementById('dl-pane-download');
     const dlPaneTrim = document.getElementById('dl-pane-trim');
+    const dlPaneLossless = document.getElementById('dl-pane-lossless');
     if (dlPaneDownload) dlPaneDownload.classList.remove('hidden');
     if (dlPaneTrim) dlPaneTrim.classList.add('hidden');
+    if (dlPaneLossless) dlPaneLossless.classList.add('hidden');
 
     updateTrimmerUI();
 
@@ -18482,8 +18484,10 @@ function bindCoverHoldZoom(wrapEl) {
     if (dlModeTabs) dlModeTabs.style.display = 'none';
     const dlPaneDownload = document.getElementById('dl-pane-download');
     const dlPaneTrim = document.getElementById('dl-pane-trim');
+    const dlPaneLossless = document.getElementById('dl-pane-lossless');
     if (dlPaneDownload) dlPaneDownload.classList.remove('hidden');
     if (dlPaneTrim) dlPaneTrim.classList.add('hidden');
+    if (dlPaneLossless) dlPaneLossless.classList.add('hidden');
     const modalTitle = document.getElementById('download-modal-title');
     if (modalTitle) modalTitle.textContent = 'Download playlist';
     if (el.downloadPreviewTitle) el.downloadPreviewTitle.textContent = playlist.name || 'Playlist';
@@ -18501,16 +18505,12 @@ function bindCoverHoldZoom(wrapEl) {
     tab.addEventListener('click', () => {
       const target = tab.dataset.dlTab;
       dlTabs.forEach(t => t.classList.toggle('active', t === tab));
-      const dlPaneDownload = document.getElementById('dl-pane-download');
-      const dlPaneTrim = document.getElementById('dl-pane-trim');
-      if (target === 'trim') {
-        if (dlPaneDownload) dlPaneDownload.classList.add('hidden');
-        if (dlPaneTrim) dlPaneTrim.classList.remove('hidden');
-        updateTrimmerUI();
-      } else {
-        if (dlPaneDownload) dlPaneDownload.classList.remove('hidden');
-        if (dlPaneTrim) dlPaneTrim.classList.add('hidden');
-      }
+      ['download', 'trim', 'lossless'].forEach(name => {
+        const pane = document.getElementById(`dl-pane-${name}`);
+        if (pane) pane.classList.toggle('hidden', name !== target);
+      });
+      if (target === 'trim') updateTrimmerUI();
+      if (target === 'lossless') refreshLossless();
     });
   });
 
@@ -21981,6 +21981,188 @@ function bindCoverHoldZoom(wrapEl) {
     const btnOpenAq = document.getElementById('btn-open-audio-quality');
     if (btnOpenAq) btnOpenAq.addEventListener('click', openAudioQualityMonitor);
     if (navigator.mediaDevices) navigator.mediaDevices.addEventListener('devicechange', () => { aq.endpoints = null; if (aq.running) aqLoadDevice(); });
+  }
+
+  const losslessModal = document.getElementById('lossless-modal');
+  const ll = { status: null, downloads: [], known: new Map(), timer: 0 };
+  const llApi = (route, body) => fetch(`http://127.0.0.1:${state.serverPort}/api/lossless/${route}`, body ? {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  } : undefined).then(r => r.json());
+
+  const LL_STATE_TEXT = {
+    starting: 'Starting',
+    searching: 'Searching Soulseek',
+    downloading: 'Downloading',
+    importing: 'Checking file',
+    done: 'Added to library',
+    failed: 'Failed',
+    cancelled: 'Cancelled'
+  };
+
+  function llReadiness() {
+    const s = ll.status;
+    if (!s) return { ready: false, text: 'Checking…' };
+    if (!s.install.supported) return { ready: false, text: 'Not available on this system' };
+    if (!s.install.installed) return { ready: false, text: s.install.status === 'downloading' ? `Installing downloader… ${s.install.percent}%` : 'Downloader not installed' };
+    if (!s.configured) return { ready: false, text: s.secureStorage ? 'Soulseek account not set' : 'Secure storage unavailable, account cannot be saved' };
+    if (s.error) return { ready: true, text: s.error };
+    if (s.daemon === 'running') return { ready: true, text: s.soulseek && s.soulseek.isReady ? `Connected as ${s.username || 'mock'}` : `Connecting to Soulseek… ${s.soulseek ? s.soulseek.state : ''}`.trim() };
+    return { ready: true, text: `Ready · ${s.username || 'mock mode'}` };
+  }
+
+  function llJobRow(job) {
+    const row = document.createElement('div');
+    row.className = `ll-job ll-job-${job.state}`;
+    const text = document.createElement('div');
+    text.className = 'll-row-text';
+    const name = document.createElement('span');
+    name.className = 'll-job-name';
+    name.textContent = [job.artist, job.title].filter(Boolean).join(' — ');
+    const sub = document.createElement('span');
+    sub.className = 'll-sub';
+    const quality = job.bitDepth || job.sampleRate ? ` · ${[job.bitDepth ? `${job.bitDepth}-bit` : '', job.sampleRate ? aqLib.formatRate(job.sampleRate) : ''].filter(Boolean).join(' / ')}` : '';
+    const progress = job.state === 'downloading' && job.progress ? ` ${job.progress}%` : '';
+    sub.textContent = `${LL_STATE_TEXT[job.state] || job.state}${progress}${quality}${job.error ? ` · ${job.error}` : ''}`;
+    text.append(name, sub);
+    row.append(text);
+    if (!['done', 'failed', 'cancelled'].includes(job.state)) {
+      const cancel = document.createElement('button');
+      cancel.className = 'btn-text-error';
+      cancel.textContent = 'Cancel';
+      cancel.addEventListener('click', () => llApi('cancel', { id: job.id }).then(refreshLossless).catch(() => {}));
+      row.append(cancel);
+    }
+    return row;
+  }
+
+  function llRender() {
+    const s = ll.status;
+    const readiness = llReadiness();
+    aqSet('ll-pane-status', readiness.text);
+    aqSet('ll-modal-status', readiness.text);
+    const btnFind = document.getElementById('btn-ll-find');
+    if (btnFind) btnFind.disabled = !readiness.ready || !trackToDownload;
+    const btnSetup = document.getElementById('btn-ll-open-setup');
+    if (btnSetup) btnSetup.textContent = readiness.ready ? 'Downloads' : 'Set up';
+
+    if (s) {
+      const btnInstall = document.getElementById('btn-ll-install');
+      const installing = s.install.status === 'downloading';
+      aqSet('ll-install-state', !s.install.supported ? 'Not available on this system'
+        : s.install.installed ? `Installed · v${s.install.version}`
+          : installing ? `Downloading… ${s.install.percent}%`
+            : s.install.error ? `Install failed: ${s.install.error}` : 'Not installed');
+      if (btnInstall) {
+        btnInstall.disabled = installing || !s.install.supported;
+        btnInstall.textContent = s.install.installed ? 'Reinstall' : 'Install';
+      }
+      const form = document.getElementById('ll-account-form');
+      const saved = document.getElementById('ll-account-saved');
+      const hasAccount = s.configured && !s.mock;
+      if (form) form.classList.toggle('hidden', hasAccount);
+      if (saved) saved.classList.toggle('hidden', !hasAccount);
+      aqSet('ll-account-name', hasAccount ? `Signed in as ${s.username}` : '');
+    }
+
+    const forTrack = trackToDownload ? ll.downloads.filter(d => d.title === trackToDownload.title && d.artist === (trackToDownload.artist || '')) : [];
+    const paneJobs = document.getElementById('ll-pane-jobs');
+    if (paneJobs) paneJobs.replaceChildren(...forTrack.slice(0, 3).map(llJobRow));
+    const modalJobs = document.getElementById('ll-modal-jobs');
+    if (modalJobs) {
+      if (ll.downloads.length) modalJobs.replaceChildren(...ll.downloads.map(llJobRow));
+      else {
+        const empty = document.createElement('span');
+        empty.className = 'll-sub';
+        empty.textContent = 'No lossless downloads yet';
+        modalJobs.replaceChildren(empty);
+      }
+    }
+  }
+
+  function llNotify() {
+    for (const job of ll.downloads) {
+      const prev = ll.known.get(job.id);
+      ll.known.set(job.id, job.state);
+      if (!prev || prev === job.state) continue;
+      if (job.state === 'done') {
+        const q = [job.codec ? job.codec.toUpperCase() : 'Lossless', job.bitDepth ? `${job.bitDepth}-bit` : '', job.sampleRate ? aqLib.formatRate(job.sampleRate) : ''].filter(Boolean).join(' ');
+        showToast(`${q} added to library: ${job.title}`, 'success');
+        if (typeof renderLocalView === 'function' && state.localTracks) renderLocalView(true);
+      } else if (job.state === 'failed') {
+        showToast(`Lossless download failed: ${job.error || job.title}`, 'error');
+      }
+    }
+  }
+
+  async function refreshLossless() {
+    if (!state.serverPort) return;
+    try {
+      const [status, list] = await Promise.all([llApi('status'), llApi('downloads')]);
+      ll.status = status;
+      ll.downloads = (list && list.downloads) || [];
+    } catch (e) {}
+    llNotify();
+    llRender();
+    const busy = ll.downloads.some(d => !['done', 'failed', 'cancelled'].includes(d.state)) ||
+      (ll.status && ll.status.install.status === 'downloading');
+    const visible = losslessModal && !losslessModal.classList.contains('hidden');
+    clearTimeout(ll.timer);
+    if (busy || visible) ll.timer = setTimeout(refreshLossless, busy ? 1200 : 4000);
+  }
+
+  function openLosslessModal() {
+    if (!losslessModal) return;
+    openModal(losslessModal);
+    refreshLossless();
+  }
+
+  if (losslessModal) {
+    losslessModal.addEventListener('click', (e) => { if (e.target === losslessModal) closeModal(losslessModal); });
+    const btnClose = document.getElementById('btn-close-lossless');
+    if (btnClose) btnClose.addEventListener('click', () => closeModal(losslessModal));
+    const btnOpen = document.getElementById('btn-open-lossless');
+    if (btnOpen) btnOpen.addEventListener('click', openLosslessModal);
+    const btnSetup = document.getElementById('btn-ll-open-setup');
+    if (btnSetup) btnSetup.addEventListener('click', openLosslessModal);
+
+    const btnInstall = document.getElementById('btn-ll-install');
+    if (btnInstall) btnInstall.addEventListener('click', () => llApi('install', {}).then(refreshLossless).catch(() => {}));
+
+    const btnSave = document.getElementById('btn-ll-save-account');
+    if (btnSave) btnSave.addEventListener('click', async () => {
+      const username = document.getElementById('ll-username').value.trim();
+      const passInput = document.getElementById('ll-password');
+      if (!username || !passInput.value) return showToast('Enter your Soulseek username and password', 'error');
+      try {
+        const res = await llApi('account', { username, password: passInput.value });
+        if (!res.success) throw new Error(res.error);
+        passInput.value = '';
+        showToast('Soulseek account saved', 'success');
+      } catch (e) {
+        showToast(e.message || 'Could not save account', 'error');
+      }
+      refreshLossless();
+    });
+
+    const btnClear = document.getElementById('btn-ll-clear-account');
+    if (btnClear) btnClear.addEventListener('click', () => llApi('account/clear', {}).then(refreshLossless).catch(() => {}));
+
+    const btnFind = document.getElementById('btn-ll-find');
+    if (btnFind) btnFind.addEventListener('click', async () => {
+      const t = trackToDownload;
+      if (!t) return;
+      btnFind.disabled = true;
+      try {
+        const res = await llApi('download', { title: t.title || '', artist: t.artist || '', album: t.album || '', duration: Number(t.duration) || 0, platform: t.platform || '' });
+        if (!res.success) throw new Error(res.error);
+        showToast(`Searching Soulseek for ${res.download.query}`, 'info');
+      } catch (e) {
+        showToast(e.message || 'Could not start lossless download', 'error');
+      }
+      refreshLossless();
+    });
   }
 
   const btnCopyDiagnostics = document.getElementById('btn-copy-diagnostics');

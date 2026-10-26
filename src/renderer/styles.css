@@ -9231,3 +9231,20 @@ body.perf #sleep-timer-status.active::before {
 .aq-big { font-size: calc(18px * var(--font-scale, 1)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .aq-row > span:first-child { white-space: nowrap; flex-shrink: 0; }
 .aq-chip { border: 1px solid var(--md-sys-color-outline-variant); }
+
+.ll-card { width: 620px; max-width: 94vw; max-height: 88vh; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+.ll-hint { margin: 0; font-size: calc(12px * var(--font-scale, 1)); color: var(--md-sys-color-on-surface-variant); line-height: 1.45; }
+.ll-status-line { margin-top: 8px; font-size: calc(13px * var(--font-scale, 1)); color: var(--md-sys-color-primary); }
+.ll-row, .ll-job { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-radius: 16px; background: var(--md-sys-color-surface-container); }
+.ll-row.hidden, .ll-account.hidden { display: none; }
+.ll-row-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: calc(13px * var(--font-scale, 1)); color: var(--md-sys-color-on-surface); }
+.ll-sub { font-size: calc(12px * var(--font-scale, 1)); color: var(--md-sys-color-on-surface-variant); overflow-wrap: anywhere; }
+.ll-job-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ll-job-done .ll-sub { color: var(--md-sys-color-primary); }
+.ll-job-failed .ll-sub { color: var(--md-sys-color-error); }
+.ll-jobs { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.ll-jobs:empty { display: none; }
+.ll-account { display: flex; gap: 8px; flex-wrap: wrap; }
+.ll-account .pill-text-input { flex: 1 1 160px; min-width: 0; }
+#btn-ll-find:disabled, #btn-ll-install:disabled { opacity: .5; cursor: default; }
+.dl-mode-tabs { grid-template-columns: repeat(3, 1fr); }

@@ -21,6 +21,7 @@ const I18N_FIX = {
 const logger = require('../shared/logger');
 const { getSystemAudioOutputInfo, getOutputEndpointFormats } = require('../shared/audio-output');
 const { summarizeProbe, parseFfmpegBanner } = require('../shared/audio-quality');
+const sockseek = require('./sockseek');
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const SAFE_MEDIA_URL = /^https?:\/\//i;
@@ -2971,6 +2972,116 @@ async function handleAudioProbe(req, res, kind, id, name) {
   res.end(JSON.stringify(result.info ? { success: true, source: kind, tool: result.tool, ...result.info } : { success: false, error: result.error }));
 }
 
+async function importLosslessDownload(job, filePath) {
+  const probe = await runAudioProbe(filePath);
+  if (!probe.info || !probe.info.lossless) {
+    fs.rmSync(filePath, { force: true });
+    throw new Error(probe.info ? `Downloaded file is ${probe.info.codec}, not lossless` : 'Downloaded file could not be read');
+  }
+  const ext = path.extname(filePath).slice(1).toLowerCase();
+  const stat = await fs.promises.stat(filePath);
+  const id = 'local_' + crypto.createHash('sha1').update(path.basename(filePath) + stat.size).digest('hex').slice(0, 12);
+  const file = `${id}.${ext}`;
+  const dest = path.join(LIBRARY_DIR, file);
+  fs.mkdirSync(LIBRARY_DIR, { recursive: true });
+  try {
+    await fs.promises.rename(filePath, dest);
+  } catch (e) {
+    await fs.promises.copyFile(filePath, dest);
+    fs.rmSync(filePath, { force: true });
+  }
+  libraryIndex[id] = {
+    id,
+    file,
+    ext,
+    title: job.title || 'Untitled',
+    artist: job.artist || 'Unknown artist',
+    duration: Math.round(probe.info.duration || 0),
+    addedAt: Date.now(),
+    source: 'soulseek'
+  };
+  saveLibraryIndex();
+  return {
+    libraryId: id,
+    codec: probe.info.codec,
+    sampleRate: probe.info.sampleRate,
+    bitDepth: probe.info.bitDepth
+  };
+}
+
+sockseek.init({ onDownloaded: importLosslessDownload });
+
+function readJsonBody(req, res) {
+  return new Promise((resolve) => {
+    let body = '';
+    req.on('data', chunk => {
+      if (res.writableEnded) return;
+      body += chunk;
+      if (body.length > MAX_BODY_BYTES) {
+        body = '';
+        req.removeAllListeners('data');
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'payload too large' }));
+        req.resume();
+        resolve(null);
+      }
+    });
+    req.on('end', () => {
+      if (res.writableEnded) return resolve(null);
+      try { resolve(JSON.parse(body || '{}')); } catch (e) { resolve({}); }
+    });
+  });
+}
+
+function sendJson(res, status, data) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(data));
+}
+
+async function handleLosslessRoute(req, res, pathname) {
+  const status = () => ({ success: true, install: require('./tools').sockseekInstallStatus(), ...sockseek.sockseekStatus() });
+  if (pathname === '/api/lossless/status' && req.method === 'GET') return sendJson(res, 200, status());
+  if (pathname === '/api/lossless/downloads' && req.method === 'GET') return sendJson(res, 200, { success: true, downloads: sockseek.listDownloads() });
+  if (req.method !== 'POST') return sendJson(res, 405, { success: false, error: 'method not allowed' });
+  const body = await readJsonBody(req, res);
+  if (!body) return;
+  try {
+    if (pathname === '/api/lossless/install') {
+      require('./tools').installSockseek().catch(() => {});
+      return sendJson(res, 200, status());
+    }
+    if (pathname === '/api/lossless/account') {
+      const username = String(body.username || '').trim();
+      const password = String(body.password || '');
+      if (!username || !password) return sendJson(res, 400, { success: false, error: 'Username and password are required' });
+      sockseek.saveAuth(username, password);
+      return sendJson(res, 200, status());
+    }
+    if (pathname === '/api/lossless/account/clear') {
+      sockseek.clearAuth();
+      return sendJson(res, 200, status());
+    }
+    if (pathname === '/api/lossless/download') {
+      const job = await sockseek.submitDownload({
+        title: String(body.title || ''),
+        artist: String(body.artist || ''),
+        album: body.album ? String(body.album) : '',
+        duration: Number(body.duration) || 0,
+        artistMaybeWrong: body.platform === 'youtube',
+        lengthUnreliable: body.platform === 'youtube'
+      });
+      return sendJson(res, 200, { success: true, download: job });
+    }
+    if (pathname === '/api/lossless/cancel') {
+      await sockseek.cancelDownload(String(body.id || ''));
+      return sendJson(res, 200, { success: true });
+    }
+  } catch (e) {
+    return sendJson(res, 400, { success: false, error: e.message });
+  }
+  return sendJson(res, 404, { success: false, error: 'not found' });
+}
+
 async function handleAudioProxy(req, res, targetUrl) {
   if (!targetUrl) {
     res.writeHead(400);
@@ -4031,6 +4142,13 @@ const TOKEN_PROTECTED_ROUTES = new Set([
   '/api/stream-info',
   '/api/audio-probe',
   '/api/audio-endpoints',
+  '/api/lossless/status',
+  '/api/lossless/downloads',
+  '/api/lossless/install',
+  '/api/lossless/account',
+  '/api/lossless/account/clear',
+  '/api/lossless/download',
+  '/api/lossless/cancel',
   '/api/track-analysis',
   '/api/tools-status',
   '/api/tools-install',
@@ -6157,6 +6275,10 @@ const server = http.createServer(async (req, res) => {
     const info = await getSystemAudioOutputInfo();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify(info));
+  }
+
+  if (parsedUrl.pathname.startsWith('/api/lossless/')) {
+    return handleLosslessRoute(req, res, parsedUrl.pathname);
   }
 
   if (parsedUrl.pathname === '/api/audio-endpoints' && req.method === 'GET') {
